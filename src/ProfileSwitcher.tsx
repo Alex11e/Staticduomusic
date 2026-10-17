@@ -20,6 +20,7 @@ export default function ProfileSwitcher({ user, onProfileChanged }: ProfileSwitc
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const activeProfile = user.profiles.find((profile) => profile.id === user.selectedProfileId) || user.profiles[0]
+  const maxProfiles = user.maxProfiles || 10
 
   async function request(route: string, method: string, body?: unknown) {
     setBusy(true)
@@ -74,8 +75,8 @@ export default function ProfileSwitcher({ user, onProfileChanged }: ProfileSwitc
       <button className="profile-trigger" aria-label={`Aktív profil: ${activeProfile?.name || user.name}`} aria-expanded={open} onClick={() => setOpen(!open)}>
         <UserRound size={16} /><span>{activeProfile?.name || user.name}</span><ChevronDown size={13} />
       </button>
-      {open ? <div className="profile-popover" role="dialog" aria-label="Duo profilok">
-        <div className="profile-popover-head"><div><strong>Duo profilok</strong><small>{user.profiles.length}/2 profil</small></div><button aria-label="Profilmenü bezárása" onClick={() => setOpen(false)}><X size={15} /></button></div>
+      {open ? <div className="profile-popover" role="dialog" aria-label="Fiókprofilok">
+        <div className="profile-popover-head"><div><strong>Fiókprofilok</strong><small>{user.profiles.length}/{maxProfiles} profil</small></div><button aria-label="Profilmenü bezárása" onClick={() => setOpen(false)}><X size={15} /></button></div>
         <div className="profile-list">
           {user.profiles.map((profile, index) => <div className="profile-row" key={profile.id}>
             {editingId === profile.id ? <form className="profile-rename-form" onSubmit={(event) => void renameProfile(event, profile.id)}>
@@ -93,14 +94,14 @@ export default function ProfileSwitcher({ user, onProfileChanged }: ProfileSwitc
             </>}
           </div>)}
         </div>
-        {user.profiles.length < 2 ? <form className="profile-create-form" onSubmit={(event) => void createProfile(event)}>
-          <div className="profile-form-title"><Plus size={15} /><strong>Második profil hozzáadása</strong></div>
+        {user.profiles.length < maxProfiles ? <form className="profile-create-form" onSubmit={(event) => void createProfile(event)}>
+          <div className="profile-form-title"><Plus size={15} /><strong>Új profil hozzáadása</strong></div>
           <input aria-label="Új profil neve" placeholder="Profilnév" value={name} onChange={(event) => setName(event.target.value)} minLength={2} maxLength={40} required />
           <input aria-label="Új profil PIN-kódja" placeholder="PIN (opcionális, 4–8 számjegy)" inputMode="numeric" type="password" pattern="[0-9]{4,8}" value={pin} onChange={(event) => setPin(event.target.value)} />
           <button type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" size={15} /> : 'Profil létrehozása'}</button>
-        </form> : <div className="profile-limit">A Duo fiók már két profilt használ.</div>}
+        </form> : <div className="profile-limit">A fiók elérte a {maxProfiles} profilból álló korlátot.</div>}
         {error ? <p className="profile-error" role="alert">{error}</p> : null}
-        <div className="profile-popover-foot">A két profil saját listákat és előzményeket használ.</div>
+        <div className="profile-popover-foot">A profilok saját hallgatási előzményeket használnak. A lejátszási listák közösek.</div>
       </div> : null}
     </div>
   )

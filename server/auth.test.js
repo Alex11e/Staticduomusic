@@ -170,9 +170,16 @@ test('admin setup, fiókok, jogosultságok, szinkron és zenefeltöltés', async
   })
   assert.equal(createProfile.response.status, 201)
   assert.equal(createProfile.data.user.profiles.length, 2)
+  assert.equal(createProfile.data.user.maxProfiles, 10)
   const duoProfile = createProfile.data.user.profiles.find((profile) => profile.id !== primaryProfileId)
   assert.ok(duoProfile?.hasPin)
-  assert.equal((await requestJson('/api/profiles', { method: 'POST', body: { name: 'Harmadik' }, cookie: userCookie })).response.status, 409)
+  for (let profileNumber = 3; profileNumber <= 10; profileNumber += 1) {
+    const additionalProfile = await requestJson('/api/profiles', {
+      method: 'POST', body: { name: `Profil ${profileNumber}` }, cookie: userCookie,
+    })
+    assert.equal(additionalProfile.response.status, 201)
+  }
+  assert.equal((await requestJson('/api/profiles', { method: 'POST', body: { name: 'Tizenegyedik' }, cookie: userCookie })).response.status, 409)
   assert.equal((await requestJson(`/api/profiles/${duoProfile.id}/select`, { method: 'POST', body: { pin: '0000' }, cookie: userCookie })).response.status, 403)
 
   const renameProfile = await requestJson(`/api/profiles/${duoProfile.id}`, {
@@ -224,7 +231,7 @@ test('admin setup, fiókok, jogosultságok, szinkron és zenefeltöltés', async
   await requestJson(`/api/profiles/${primaryProfileId}/select`, { method: 'POST', body: {}, cookie: userCookie })
   const deleteProfile = await requestJson(`/api/profiles/${duoProfile.id}`, { method: 'DELETE', cookie: userCookie })
   assert.equal(deleteProfile.response.status, 200)
-  assert.equal(deleteProfile.data.user.profiles.length, 1)
+  assert.equal(deleteProfile.data.user.profiles.length, 9)
   assert.deepEqual((await requestJson('/api/me/state', { cookie: secondSessionCookie })).data, {
     favorites: [], recent: [], queue: [], volume: 0.8, playlists: [],
   })

@@ -17,6 +17,7 @@ export type SessionUser = {
   createdAt: string
   profiles: AccountProfile[]
   selectedProfileId: string
+  maxProfiles: number
 }
 
 export type AuthStatus = {

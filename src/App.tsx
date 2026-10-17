@@ -180,8 +180,19 @@ export default function App() {
         // The next poll retries if a device is temporarily offline.
       }
     }
+    function handleVisibility() {
+      if (!document.hidden) void syncSharedPlaylists()
+    }
+    void syncSharedPlaylists()
     const interval = window.setInterval(() => void syncSharedPlaylists(), 5000)
-    return () => { active = false; window.clearInterval(interval) }
+    window.addEventListener('focus', handleVisibility)
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => {
+      active = false
+      window.clearInterval(interval)
+      window.removeEventListener('focus', handleVisibility)
+      document.removeEventListener('visibilitychange', handleVisibility)
+    }
   }, [loadedUserId, user])
   useEffect(() => {
     if (!audio.current) return

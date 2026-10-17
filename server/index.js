@@ -18,6 +18,7 @@ const bootstrapTokenPath = path.join(dataDir, 'bootstrap-token')
 const port = Number(process.env.PORT || 4000)
 const host = process.env.HOST || '0.0.0.0'
 const sessionLifetime = 30 * 24 * 60 * 60 * 1000
+const maxProfilesPerAccount = 10
 const maxUploadBytes = 500 * 1024 * 1024
 const maxArchiveEntries = 5000
 const maxArchiveFileBytes = 500 * 1024 * 1024
@@ -113,7 +114,7 @@ async function initializeStore() {
           delete user.volume
           profilesChanged = true
         } else {
-          user.profiles = user.profiles.slice(0, 2)
+          user.profiles = user.profiles.slice(0, maxProfilesPerAccount)
           for (const profile of user.profiles) {
             profile.state = { ...defaultProfileState(), ...profile.state }
           }
@@ -179,7 +180,7 @@ function safeUser(user, session) {
     : profiles[0]?.id
   return {
     id: user.id, name: user.name, email: user.email, role: user.role, active: user.active,
-    createdAt: user.createdAt, profiles, selectedProfileId,
+    createdAt: user.createdAt, profiles, selectedProfileId, maxProfiles: maxProfilesPerAccount,
   }
 }
 
@@ -648,7 +649,10 @@ const server = createServer(async (request, response) => {
       const name = typeof body.name === 'string' ? body.name.trim().slice(0, 40) : ''
       const pin = typeof body.pin === 'string' ? body.pin : ''
       if (name.length < 2) { sendJson(response, 400, { error: 'A profilnév legalább 2 karakter legyen.' }); return }
-      if (user.profiles.length >= 2) { sendJson(response, 409, { error: 'A Duo fiókban legfeljebb két profil lehet.' }); return }
+      if (user.profiles.length >= maxProfilesPerAccount) {
+        sendJson(response, 409, { error: `Egy fiókban legfeljebb ${maxProfilesPerAccount} profil lehet.` })
+        return
+      }
       if (user.profiles.some((entry) => entry.name.toLocaleLowerCase('hu') === name.toLocaleLowerCase('hu'))) {
         sendJson(response, 409, { error: 'Már létezik ilyen nevű profil.' })
         return
