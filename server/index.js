@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 import { isAllowedDownloadUrl, resolveMusicDownload, searchInternetArchive, searchJamendo } from './music-sources.js'
 import { maxLyricsBytes, parseLrc } from './lyrics.js'
+import { fetchSyncedLyrics } from './musixmatch.js'
   import { parseFile } from 'music-metadata'
   import yauzl from 'yauzl'
 
@@ -45,7 +46,10 @@ function defaultStore() {
 function defaultProfileState() {
   return {
     favorites: [], recent: [], queue: [], volume: 0.8,
-    playback: { trackId: '', position: 0, playing: false, shuffle: false, repeat: 'off' },
+    playback: {
+      trackId: '', position: 0, playing: false, shuffle: false, repeat: 'off',
+      sleepTimerEndsAt: null, sleepTimerEndOfTrack: false,
+    },
   }
 }
 
@@ -866,12 +870,19 @@ const server = createServer(async (request, response) => {
       profile.state.queue = Array.isArray(body.queue) ? [...new Set(body.queue.filter((id) => typeof id === 'string'))].slice(0, 500) : []
       profile.state.volume = Number.isFinite(body.volume) ? Math.max(0, Math.min(1, body.volume)) : 0.8
       const playback = body.playback && typeof body.playback === 'object' ? body.playback : {}
+      const sleepTimerEndsAt = Number.isFinite(playback.sleepTimerEndsAt)
+        && playback.sleepTimerEndsAt > Date.now()
+        && playback.sleepTimerEndsAt <= Date.now() + 24 * 60 * 60 * 1000
+        ? playback.sleepTimerEndsAt
+        : null
       profile.state.playback = {
         trackId: typeof playback.trackId === 'string' ? playback.trackId.slice(0, 256) : '',
         position: Number.isFinite(playback.position) ? Math.max(0, Math.min(86400, playback.position)) : 0,
         playing: playback.playing === true,
         shuffle: playback.shuffle === true,
         repeat: ['off', 'all', 'one'].includes(playback.repeat) ? playback.repeat : 'off',
+        sleepTimerEndsAt,
+        sleepTimerEndOfTrack: sleepTimerEndsAt === null && playback.sleepTimerEndOfTrack === true,
       }
       await saveStore()
       sendJson(response, 200, { ok: true })
@@ -885,21 +896,44 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: 'Érvénytelen zenefájl.' })
         return
       }
+      let trackDetails
+      try { trackDetails = await stat(trackPath) }
+      catch (error) {
+        if (error.code === 'ENOENT') { sendJson(response, 404, { error: 'A zenefájl nem található.' }); return }
+        throw error
+      }
+      if (!trackDetails.isFile()) { sendJson(response, 404, { error: 'A zenefájl nem található.' }); return }
       const lyricsPath = path.join(path.dirname(trackPath), `${path.basename(trackPath, path.extname(trackPath))}.lrc`)
       let lyricsText
       try {
         const lyricsDetails = await stat(lyricsPath)
-        if (!lyricsDetails.isFile()) { sendJson(response, 404, { error: 'Ehhez a zenéhez nincs időzített dalszöveg.' }); return }
-        if (lyricsDetails.size > maxLyricsBytes) { sendJson(response, 413, { error: 'A dalszöveg fájl túl nagy.' }); return }
-        lyricsText = await readFile(lyricsPath, 'utf8')
+        if (lyricsDetails.isFile()) {
+          if (lyricsDetails.size > maxLyricsBytes) { sendJson(response, 413, { error: 'A dalszöveg fájl túl nagy.' }); return }
+          lyricsText = await readFile(lyricsPath, 'utf8')
+        }
       }
       catch (error) {
-        if (error.code === 'ENOENT') { sendJson(response, 404, { error: 'Ehhez a zenéhez nincs időzített dalszöveg.' }); return }
-        throw error
+        if (error.code === 'ENOENT') lyricsText = ''
+        else throw error
       }
-      const lines = parseLrc(lyricsText)
-      if (!lines.length) { sendJson(response, 404, { error: 'Ehhez a zenéhez nincs érvényes időzített dalszöveg.' }); return }
-      sendJson(response, 200, { lines })
+      const lines = parseLrc(lyricsText || '')
+      if (lines.length) {
+        sendJson(response, 200, { lines, attribution: '', trackingUrl: '' })
+        return
+      }
+      const metadata = await readTrackMetadata(trackPath, trackDetails)
+      const relativeFolder = path.posix.dirname(relativePath)
+      const fallbackTitle = path.basename(trackPath, path.extname(trackPath)).replace(/[_]+/g, ' ').replace(/\s+-\s+/g, ' - ')
+      const fallbackArtist = relativeFolder === '.' ? 'Ismeretlen előadó' : relativeFolder.split('/').at(-1)
+      try {
+        const syncedLyrics = await fetchSyncedLyrics({
+          title: metadata.title || fallbackTitle,
+          artist: metadata.artist || fallbackArtist,
+        }, process.env.MUSIXMATCH_API_KEY)
+        sendJson(response, 200, syncedLyrics)
+      } catch (error) {
+        sendJson(response, error.status || 502, { error: error.message || 'Ehhez a zenéhez nincs időzített dalszöveg.' })
+      }
       return
     }
     if (pathname === '/api/admin/users' && request.method === 'GET') {

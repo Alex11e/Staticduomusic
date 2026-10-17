@@ -95,6 +95,7 @@ before(async () => {
   serverUrl = `http://127.0.0.1:${port}`
   const env = { ...process.env, PORT: String(port), HOST: '127.0.0.1', MUSIC_DIR: musicDirectory, DATA_DIR: dataDirectory }
   delete env.BOOTSTRAP_ADMIN_TOKEN
+  delete env.MUSIXMATCH_API_KEY
   serverProcess = spawn(process.execPath, [path.join(projectRoot, 'server', 'index.js')], {
     cwd: projectRoot,
     env,
@@ -194,13 +195,16 @@ test('admin setup, fiókok, jogosultságok, szinkron és zenefeltöltés', async
   assert.equal(selectDuo.data.user.selectedProfileId, duoProfile.id)
   const state = {
     favorites: ['track-1'], recent: ['track-1'], queue: ['track-2'], volume: 0.4,
-    playback: { trackId: 'track-1', position: 42, playing: true, shuffle: true, repeat: 'all' },
+    playback: {
+      trackId: 'track-1', position: 42, playing: true, shuffle: true, repeat: 'all',
+      sleepTimerEndsAt: Date.now() + 60_000, sleepTimerEndOfTrack: false,
+    },
   }
   assert.equal((await requestJson('/api/me/state', { method: 'PUT', body: state, cookie: userCookie })).response.status, 200)
   assert.deepEqual((await requestJson('/api/me/state', { cookie: userCookie })).data, { ...state, playlists: [] })
   assert.deepEqual((await requestJson('/api/me/state', { cookie: secondSessionCookie })).data, {
     favorites: [], recent: [], queue: [], volume: 0.8,
-    playback: { trackId: '', position: 0, playing: false, shuffle: false, repeat: 'off' }, playlists: [],
+    playback: { trackId: '', position: 0, playing: false, shuffle: false, repeat: 'off', sleepTimerEndsAt: null, sleepTimerEndOfTrack: false }, playlists: [],
   })
   const selectOtherSession = await requestJson(`/api/profiles/${duoProfile.id}/select`, {
     method: 'POST', body: { pin: '2468' }, cookie: secondSessionCookie,
@@ -238,7 +242,7 @@ test('admin setup, fiókok, jogosultságok, szinkron és zenefeltöltés', async
   assert.equal(deleteProfile.data.user.profiles.length, 9)
   assert.deepEqual((await requestJson('/api/me/state', { cookie: secondSessionCookie })).data, {
     favorites: [], recent: [], queue: [], volume: 0.8,
-    playback: { trackId: '', position: 0, playing: false, shuffle: false, repeat: 'off' }, playlists: [],
+    playback: { trackId: '', position: 0, playing: false, shuffle: false, repeat: 'off', sleepTimerEndsAt: null, sleepTimerEndOfTrack: false }, playlists: [],
   })
 
   assert.equal((await requestJson('/api/admin/users', { cookie: userCookie })).response.status, 403)
@@ -282,6 +286,9 @@ test('admin setup, fiókok, jogosultságok, szinkron és zenefeltöltés', async
   assert.equal(uploadedTrack.artist, 'Fixture artist')
   assert.equal(uploadedTrack.album, 'Fixture album')
   assert.ok(uploadedTrack.coverUrl)
+  const automaticLyricsWithoutKey = await requestJson(`/api/lyrics/${uploadedTrack.id}`, { cookie: adminCookie })
+  assert.equal(automaticLyricsWithoutKey.response.status, 503)
+  assert.match(automaticLyricsWithoutKey.data.error, /MUSIXMATCH_API_KEY/)
   const cover = await fetch(`${serverUrl}${uploadedTrack.coverUrl}`, { headers: { Cookie: adminCookie } })
   assert.equal(cover.status, 200)
   assert.equal(cover.headers.get('content-type'), 'image/png')

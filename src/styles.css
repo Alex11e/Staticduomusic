@@ -172,6 +172,13 @@ h1 span { color: var(--lime); }
 .server-live { display: flex; align-items: center; gap: 7px; margin-right: 10px; color: #949a8c; font-size: 8px; white-space: nowrap; }
 .server-live span { width: 6px; height: 6px; }
 .player-volume input { width: 72px; }
+.sleep-timer-wrap { position: relative; display: flex; align-items: center; }
+.sleep-timer-badge { position: absolute; top: -7px; right: -12px; padding: 2px 3px; border-radius: 2px; background: #303a24; color: var(--lime); font: 7px var(--mono); white-space: nowrap; }
+.sleep-timer-menu { position: absolute; right: -22px; bottom: calc(100% + 13px); z-index: 8; display: grid; width: 210px; gap: 8px; padding: 12px; border: 1px solid #ffffff1a; background: #171a15; box-shadow: 0 14px 34px #0008; }
+.sleep-timer-menu strong { padding: 2px 2px 4px; color: #e8e9df; font-size: 10px; }
+.sleep-timer-menu button { min-height: 31px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 3px; background: #1d2119; color: #c5c9bd; font-size: 9px; text-align: left; cursor: pointer; }
+.sleep-timer-menu button:hover { border-color: #778c52; color: var(--lime); }
+.sleep-timer-options { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .spin { animation: rotate .9s linear infinite; }
 @keyframes rotate { to { transform: rotate(360deg); } }
 audio { display: none; }
@@ -247,7 +254,9 @@ audio { display: none; }
   .play-button { width: 32px; height: 32px; }
   .timeline { width: 100%; grid-template-columns: 29px 1fr 29px; gap: 6px; }
   .player-volume { grid-column: 2; grid-row: 1; }
+  .player-volume { gap: 5px; }
   .player-volume input { width: 55px; }
+  .sleep-timer-menu { right: -75px; }
   .volume-icon { width: 22px; }
   .section-tools { gap: 8px; }
   .sort-select span { display: none; }
@@ -417,6 +426,8 @@ audio { display: none; }
 .lyric-line + .lyric-line { margin-top: 14px; }
 .lyric-line.upcoming { color: #a4aa9a; }
 .lyric-line.active { color: var(--lime); font-size: 19px; font-weight: 650; }
+.lyrics-attribution { display: inline-block; margin-top: 24px; color: #858b7d; font-size: 9px; text-decoration: none; }
+.lyrics-attribution:hover { color: var(--lime); }
 .lyrics-message { display: flex; flex: 1; align-items: center; justify-content: center; gap: 9px; padding: 24px; color: #929789; font-size: 11px; text-align: center; }
 @keyframes lyrics-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 

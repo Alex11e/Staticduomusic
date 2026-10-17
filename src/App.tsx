@@ -29,7 +29,15 @@ type Playlist = { id: string; name: string; trackIds: string[] }
 type View = 'all' | 'favorites' | 'recent' | 'queue' | 'artists' | 'albums' | 'discover' | 'artist' | 'album' | 'admin' | `playlist:${string}`
 type RepeatMode = 'off' | 'all' | 'one'
 type SortBy = 'custom' | 'title' | 'artist' | 'album'
-type PlaybackState = { trackId: string; position: number; playing: boolean; shuffle: boolean; repeat: RepeatMode }
+type PlaybackState = {
+  trackId: string
+  position: number
+  playing: boolean
+  shuffle: boolean
+  repeat: RepeatMode
+  sleepTimerEndsAt: number | null
+  sleepTimerEndOfTrack: boolean
+}
 type UserState = { favorites: string[]; playlists: Playlist[]; recent: string[]; queue: string[]; volume: number; playback?: PlaybackState }
 type LyricLine = { time: number; text: string }
 
@@ -70,6 +78,7 @@ export default function App() {
   const [lyrics, setLyrics] = useState<LyricLine[]>([])
   const [lyricsLoading, setLyricsLoading] = useState(false)
   const [lyricsError, setLyricsError] = useState('')
+  const [lyricsAttribution, setLyricsAttribution] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [actionError, setActionError] = useState('')
@@ -84,6 +93,10 @@ export default function App() {
   const [volume, setVolume] = useState(() => readSaved('hangtar-volume', 0.8))
   const [shuffle, setShuffle] = useState(false)
   const [repeat, setRepeat] = useState<RepeatMode>('off')
+  const [sleepTimerEndsAt, setSleepTimerEndsAt] = useState<number | null>(null)
+  const [sleepTimerEndOfTrack, setSleepTimerEndOfTrack] = useState(false)
+  const [sleepTimerOpen, setSleepTimerOpen] = useState(false)
+  const [sleepTimerNow, setSleepTimerNow] = useState(() => Date.now())
   const [creatingPlaylist, setCreatingPlaylist] = useState(false)
   const [playlistName, setPlaylistName] = useState('')
   const [editingPlaylistId, setEditingPlaylistId] = useState('')
@@ -93,10 +106,12 @@ export default function App() {
   const [selectedAlbum, setSelectedAlbum] = useState('')
 
   const activeLyricIndex = lyrics.reduce((active, line, index) => line.time <= time ? index : active, -1)
+  const sleepTimerRemaining = sleepTimerEndsAt === null ? null : Math.max(0, Math.ceil((sleepTimerEndsAt - sleepTimerNow) / 1000))
+  const sleepTimerActive = sleepTimerRemaining !== null || sleepTimerEndOfTrack
 
   stateSnapshot.current = {
     favorites, playlists, recent, queue, volume,
-    playback: { trackId: current?.id || '', position: time, playing, shuffle, repeat },
+    playback: { trackId: current?.id || '', position: time, playing, shuffle, repeat, sleepTimerEndsAt, sleepTimerEndOfTrack },
   }
 
   async function persistProfileState() {
@@ -137,14 +152,19 @@ export default function App() {
     setQueue(saved.queue || [])
     setVolume(Number.isFinite(saved.volume) ? saved.volume : 0.8)
     const playback = saved.playback
+    const savedTimerEnd = playback?.sleepTimerEndsAt
+    const timerExpired = typeof savedTimerEnd === 'number' && savedTimerEnd <= Date.now()
     const resumedTrack = playback?.trackId ? library.tracks.find((track) => track.id === playback.trackId) || null : null
     pendingSeek.current = resumedTrack ? Math.max(0, playback?.position || 0) : 0
     setCurrent(resumedTrack)
     setTime(pendingSeek.current)
     setDuration(0)
-    setPlaying(Boolean(resumedTrack && playback?.playing))
+    setPlaying(Boolean(resumedTrack && playback?.playing && !timerExpired))
     setShuffle(playback?.shuffle === true)
     setRepeat(playback?.repeat === 'all' || playback?.repeat === 'one' ? playback.repeat : 'off')
+    setSleepTimerEndsAt(typeof savedTimerEnd === 'number' && savedTimerEnd > Date.now() ? savedTimerEnd : null)
+    setSleepTimerEndOfTrack(playback?.sleepTimerEndOfTrack === true && !timerExpired && !(typeof savedTimerEnd === 'number' && savedTimerEnd > Date.now()))
+    setSleepTimerNow(Date.now())
     setLoadedUserId(account.id)
     setUser(account)
     profileSwitching.current = false
@@ -225,7 +245,7 @@ export default function App() {
       window.clearTimeout(timeout)
       if (saveTimeout.current === timeout) saveTimeout.current = 0
     }
-  }, [current, favorites, loadedUserId, playing, queue, recent, repeat, shuffle, user, volume])
+  }, [current, favorites, loadedUserId, playing, queue, recent, repeat, shuffle, sleepTimerEndOfTrack, sleepTimerEndsAt, user, volume])
   useEffect(() => {
     if (!user || loadedUserId !== user.id) return
     const interval = window.setInterval(() => {
@@ -267,19 +287,46 @@ export default function App() {
     else audio.current.pause()
   }, [current, playing, volume])
   useEffect(() => {
+    if (sleepTimerEndsAt === null) return
+    const interval = window.setInterval(() => {
+      const now = Date.now()
+      setSleepTimerNow(now)
+      if (now < sleepTimerEndsAt) return
+      setPlaying(false)
+      setSleepTimerEndsAt(null)
+      setSleepTimerEndOfTrack(false)
+      setSleepTimerOpen(false)
+    }, 1000)
+    return () => window.clearInterval(interval)
+  }, [sleepTimerEndsAt])
+  useEffect(() => {
     if (!lyricsOpen || !current) {
       setLyrics([])
       setLyricsError('')
+      setLyricsAttribution('')
       return
     }
     let active = true
     setLyricsLoading(true)
     setLyricsError('')
+    setLyricsAttribution('')
     void fetch(`/api/lyrics/${encodeURIComponent(current.id)}`)
       .then(async (response) => {
-        const result = await response.json() as { lines?: LyricLine[]; error?: string }
+        const result = await response.json() as { lines?: LyricLine[]; error?: string; attribution?: string; trackingUrl?: string }
         if (!response.ok) throw new Error(result.error || 'A dalszöveg nem érhető el.')
-        if (active) setLyrics(result.lines || [])
+        if (active) {
+          setLyrics(result.lines || [])
+          setLyricsAttribution(result.attribution || '')
+          if (result.trackingUrl) {
+            try {
+              const trackingUrl = new URL(result.trackingUrl)
+              if (trackingUrl.protocol === 'https:' && trackingUrl.hostname === 'tracking.musixmatch.com') {
+                const pixel = new window.Image()
+                pixel.src = trackingUrl.toString()
+              }
+            } catch { /* Ignore an invalid provider tracking URL. */ }
+          }
+        }
       })
       .catch((cause) => {
         if (active) setLyricsError(cause instanceof Error ? cause.message : 'A dalszöveg nem érhető el.')
@@ -520,12 +567,37 @@ export default function App() {
   }
 
   function handleEnded() {
+    if (sleepTimerEndOfTrack) {
+      setPlaying(false)
+      setSleepTimerEndOfTrack(false)
+      return
+    }
     if (repeat === 'one' && audio.current) {
       audio.current.currentTime = 0
       void audio.current.play()
       return
     }
     playRelative(1, true)
+  }
+
+  function startSleepTimer(minutes: number) {
+    const now = Date.now()
+    setSleepTimerNow(now)
+    setSleepTimerEndsAt(now + minutes * 60 * 1000)
+    setSleepTimerEndOfTrack(false)
+    setSleepTimerOpen(false)
+  }
+
+  function startSleepAtEndOfTrack() {
+    setSleepTimerEndsAt(null)
+    setSleepTimerEndOfTrack(true)
+    setSleepTimerOpen(false)
+  }
+
+  function clearSleepTimer() {
+    setSleepTimerEndsAt(null)
+    setSleepTimerEndOfTrack(false)
+    setSleepTimerOpen(false)
   }
 
   const headingTitle = activePlaylist?.name || (view === 'favorites' ? 'A te kedvenceid' : view === 'recent' ? 'Nemrég hallgatva' : view === 'queue' ? 'Lejátszási sor' : view === 'artists' ? 'Előadók' : view === 'albums' ? 'Albumok' : view === 'discover' ? 'Felfedezés' : view === 'artist' ? selectedArtist : view === 'album' ? selectedAlbum : 'Saját hangzás')
@@ -682,6 +754,7 @@ export default function App() {
         <div className="lyrics-panel-head"><div><span>IDŐZÍTETT DALSZÖVEG</span><strong>{current?.title || 'Nincs lejátszott zene'}</strong></div><button className="icon-button" aria-label="Dalszöveg bezárása" onClick={() => setLyricsOpen(false)}><X size={17} /></button></div>
         {lyricsLoading ? <div className="lyrics-message"><LoaderCircle className="spin" size={20} /> Dalszöveg betöltése...</div> : lyricsError ? <div className="lyrics-message">{lyricsError}</div> : <div className="lyrics-lines" aria-live="polite">
           {lyrics.map((line, index) => <p ref={(element) => { lyricLineRefs.current[index] = element }} className={index === activeLyricIndex ? 'lyric-line active' : index > activeLyricIndex ? 'lyric-line upcoming' : 'lyric-line'} key={`${line.time}:${index}`}>{line.text}</p>)}
+          {lyricsAttribution ? <a className="lyrics-attribution" href="https://www.musixmatch.com" target="_blank" rel="noreferrer">{lyricsAttribution}</a> : null}
         </div>}
       </aside> : null}
       <section className="player" aria-label="Zenelejátszó">
@@ -704,6 +777,15 @@ export default function App() {
         </div>
         <div className="player-volume">
           <span className="server-live"><span /> SZERVER AKTÍV</span>
+          <div className="sleep-timer-wrap">
+            <button className={sleepTimerActive ? 'control-button mode-active' : 'control-button'} aria-label={sleepTimerEndsAt !== null ? `Elalvásidőzítő: ${formatTime(sleepTimerRemaining || 0)} van hátra` : sleepTimerEndOfTrack ? 'Elalvásidőzítő: szám végén leáll' : 'Elalvásidőzítő beállítása'} title="Elalvásidőzítő" onClick={() => setSleepTimerOpen(!sleepTimerOpen)}><Clock3 size={17} />{sleepTimerRemaining !== null ? <span className="sleep-timer-badge">{formatTime(sleepTimerRemaining)}</span> : null}</button>
+            {sleepTimerOpen ? <div className="sleep-timer-menu" role="dialog" aria-label="Elalvásidőzítő">
+              <strong>Lejátszás leállítása</strong>
+              <div className="sleep-timer-options">{[15, 30, 45, 60].map((minutes) => <button type="button" key={minutes} onClick={() => startSleepTimer(minutes)}>{minutes} perc</button>)}</div>
+              <button type="button" onClick={startSleepAtEndOfTrack}>Aktuális szám végén</button>
+              {sleepTimerActive ? <button type="button" onClick={clearSleepTimer}>Időzítő kikapcsolása</button> : null}
+            </div> : null}
+          </div>
           <button className={lyricsOpen ? 'control-button mode-active' : 'control-button'} aria-label={lyricsOpen ? 'Dalszöveg bezárása' : 'Időzített dalszöveg megjelenítése'} title="Dalszöveg" disabled={!current} onClick={() => setLyricsOpen(!lyricsOpen)}><Captions size={17} /></button>
           <button className="control-button volume-icon" aria-label={volume === 0 ? 'Hang bekapcsolása' : 'Némítás'} onClick={() => setVolume(volume === 0 ? 0.8 : 0)}>{volume === 0 ? <VolumeX size={17} /> : <Volume2 size={17} />}</button>
           <input aria-label="Hangerő" type="range" min="0" max="1" step="0.01" value={volume} onChange={(event) => setVolume(Number(event.target.value))} style={{ '--progress': `${volume * 100}%` } as CSSProperties} />
