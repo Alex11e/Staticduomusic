@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, CSSProperties } from 'react'
 import {
-  AudioLines, Clock3, Disc3, Heart, ListMusic, ListPlus, LoaderCircle, Music2,
-  Pause, Play, Plus, Radio, RefreshCw, Repeat, Search, Shuffle, SkipBack,
-  SkipForward, Trash2, Volume2, VolumeX,
+  ArrowDown, ArrowUp, AudioLines, Check, Clock3, Disc3, Heart, ListMusic,
+  ListPlus, LoaderCircle, LogOut, Music2, Pause, Pencil, Play, Plus, Radio,
+  RefreshCw, Repeat, Search, ShieldCheck, Shuffle, SkipBack, SkipForward,
+  Trash2, Volume2, VolumeX, X,
 } from 'lucide-react'
+import AdminPanel from './AdminPanel'
+import AuthScreen from './AuthScreen'
+import ProfileSwitcher from './ProfileSwitcher'
+import type { AuthStatus, SessionUser } from './AuthScreen'
 
 type Track = {
   id: string
@@ -12,14 +17,19 @@ type Track = {
   artist: string
   album: string
   duration: number | null
+  year?: number | null
+  genre?: string
+  coverUrl?: string | null
   size: number
   url: string
 }
 
 type LibraryResponse = { tracks: Track[] }
 type Playlist = { id: string; name: string; trackIds: string[] }
-type View = 'all' | 'favorites' | 'recent' | `playlist:${string}`
+type View = 'all' | 'favorites' | 'recent' | 'queue' | 'artists' | 'albums' | 'discover' | 'artist' | 'album' | 'admin' | `playlist:${string}`
 type RepeatMode = 'off' | 'all' | 'one'
+type SortBy = 'custom' | 'title' | 'artist' | 'album'
+type UserState = { favorites: string[]; playlists: Playlist[]; recent: string[]; queue: string[]; volume: number }
 
 function readSaved<T>(key: string, fallback: T): T {
   try {
@@ -43,15 +53,21 @@ export default function App() {
   const audio = useRef<HTMLAudioElement>(null)
   const searchInput = useRef<HTMLInputElement>(null)
   const [tracks, setTracks] = useState<Track[]>([])
+  const [user, setUser] = useState<SessionUser | null>(null)
+  const [authStatus, setAuthStatus] = useState<AuthStatus>({ setupRequired: false, registrationOpen: true })
+  const [authReady, setAuthReady] = useState(false)
+  const [loadedUserId, setLoadedUserId] = useState('')
   const [current, setCurrent] = useState<Track | null>(null)
   const [playing, setPlaying] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [actionError, setActionError] = useState('')
   const [query, setQuery] = useState('')
   const [view, setView] = useState<View>('all')
   const [favorites, setFavorites] = useState<string[]>(() => readSaved('hangtar-favorites', []))
   const [playlists, setPlaylists] = useState<Playlist[]>(() => readSaved('hangtar-playlists', []))
   const [recent, setRecent] = useState<string[]>(() => readSaved('hangtar-recent', []))
+  const [queue, setQueue] = useState<string[]>([])
   const [time, setTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [volume, setVolume] = useState(() => readSaved('hangtar-volume', 0.8))
@@ -59,12 +75,18 @@ export default function App() {
   const [repeat, setRepeat] = useState<RepeatMode>('off')
   const [creatingPlaylist, setCreatingPlaylist] = useState(false)
   const [playlistName, setPlaylistName] = useState('')
+  const [editingPlaylistId, setEditingPlaylistId] = useState('')
+  const [editingPlaylistName, setEditingPlaylistName] = useState('')
+  const [sortBy, setSortBy] = useState<SortBy>('custom')
+  const [selectedArtist, setSelectedArtist] = useState('')
+  const [selectedAlbum, setSelectedAlbum] = useState('')
 
   async function loadLibrary() {
     setLoading(true)
     setError('')
     try {
       const response = await fetch('/api/tracks')
+      if (response.status === 401) { setUser(null); return }
       if (!response.ok) throw new Error('A zeneszerver nem válaszol.')
       const data = await response.json() as LibraryResponse
       setTracks(data.tracks)
@@ -75,11 +97,92 @@ export default function App() {
     }
   }
 
-  useEffect(() => { void loadLibrary() }, [])
-  useEffect(() => { localStorage.setItem('hangtar-favorites', JSON.stringify(favorites)) }, [favorites])
-  useEffect(() => { localStorage.setItem('hangtar-playlists', JSON.stringify(playlists)) }, [playlists])
-  useEffect(() => { localStorage.setItem('hangtar-recent', JSON.stringify(recent)) }, [recent])
-  useEffect(() => { localStorage.setItem('hangtar-volume', JSON.stringify(volume)) }, [volume])
+  async function loadAccount(account: SessionUser) {
+    setLoading(true)
+    const [libraryResponse, stateResponse] = await Promise.all([fetch('/api/tracks'), fetch('/api/me/state')])
+    if (libraryResponse.status === 401 || stateResponse.status === 401) throw new Error('A munkamenet lejárt. Jelentkezz be újra.')
+    if (!libraryResponse.ok || !stateResponse.ok) throw new Error('Nem sikerült betölteni a fiók adatait.')
+    const [library, saved] = await Promise.all([libraryResponse.json(), stateResponse.json()]) as [LibraryResponse, UserState]
+    setTracks(library.tracks)
+    setFavorites(saved.favorites || [])
+    setPlaylists(saved.playlists || [])
+    setRecent(saved.recent || [])
+    setQueue(saved.queue || [])
+    setVolume(Number.isFinite(saved.volume) ? saved.volume : 0.8)
+    setLoadedUserId(account.id)
+    setUser(account)
+    setError('')
+    setLoading(false)
+  }
+
+  async function initializeAuth() {
+    try {
+      const statusResponse = await fetch('/api/auth/status')
+      if (!statusResponse.ok) throw new Error('A hitelesítési szerver nem válaszol.')
+      setAuthStatus(await statusResponse.json() as AuthStatus)
+      const response = await fetch('/api/auth/me')
+      if (response.ok) {
+        const data = await response.json() as { user: SessionUser }
+        await loadAccount(data.user)
+      } else {
+        setLoading(false)
+      }
+    } catch {
+      setError('Nem sikerült kapcsolódni a szerverhez.')
+      setLoading(false)
+    } finally {
+      setAuthReady(true)
+    }
+  }
+
+  async function signIn(account: SessionUser) {
+    await loadAccount(account)
+    setView('all')
+  }
+
+  async function switchProfile(account: SessionUser) {
+    await loadAccount(account)
+    setView('all')
+  }
+
+  async function signOut() {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {})
+    setUser(null)
+    setLoadedUserId('')
+    setTracks([])
+    setCurrent(null)
+    setPlaying(false)
+    setAuthStatus((status) => ({ ...status, setupRequired: false }))
+  }
+
+  useEffect(() => { void initializeAuth() }, [])
+  useEffect(() => {
+    if (!user || loadedUserId !== user.id) return
+    const timeout = window.setTimeout(() => {
+      void fetch('/api/me/state', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ favorites, recent, queue, volume }),
+      }).catch(() => setError('Nem sikerült szinkronizálni a fiók adatait.'))
+    }, 250)
+    return () => window.clearTimeout(timeout)
+  }, [favorites, loadedUserId, queue, recent, user, volume])
+  useEffect(() => {
+    if (!user || loadedUserId !== user.id) return
+    let active = true
+    async function syncSharedPlaylists() {
+      try {
+        const response = await fetch('/api/me/playlists')
+        if (!response.ok) return
+        const data = await response.json() as { playlists: Playlist[] }
+        if (active) setPlaylists((current) => JSON.stringify(current) === JSON.stringify(data.playlists) ? current : data.playlists)
+      } catch {
+        // The next poll retries if a device is temporarily offline.
+      }
+    }
+    const interval = window.setInterval(() => void syncSharedPlaylists(), 5000)
+    return () => { active = false; window.clearInterval(interval) }
+  }, [loadedUserId, user])
   useEffect(() => {
     if (!audio.current) return
     audio.current.volume = volume
@@ -106,6 +209,48 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleShortcut)
   })
 
+  const recommendedTracks = useMemo(() => {
+    const listeningIds = new Set([...favorites, ...recent.slice(0, 12)])
+    const preferredArtists = new Set(tracks.filter((track) => listeningIds.has(track.id)).map((track) => track.artist))
+    const playedRecently = new Set(recent.slice(0, 8))
+    const recommendations = tracks.filter((track) => preferredArtists.has(track.artist) && !playedRecently.has(track.id) && !favorites.includes(track.id))
+    return recommendations.length ? recommendations : tracks.filter((track) => !favorites.includes(track.id))
+  }, [favorites, recent, tracks])
+
+  const artistCollections = useMemo(() => {
+    const groups = new Map<string, Track[]>()
+    for (const track of tracks) {
+      const group = groups.get(track.artist)
+      if (group) group.push(track)
+      else groups.set(track.artist, [track])
+    }
+    return Array.from(groups, ([name, entries]) => ({ name, count: entries.length, coverUrl: entries.find((track) => track.coverUrl)?.coverUrl || null }))
+      .sort((left, right) => left.name.localeCompare(right.name, 'hu'))
+  }, [tracks])
+
+  const albumCollections = useMemo(() => {
+    const groups = new Map<string, Track[]>()
+    for (const track of tracks) {
+      const key = `${track.artist}\u0000${track.album}`
+      const group = groups.get(key)
+      if (group) group.push(track)
+      else groups.set(key, [track])
+    }
+    return Array.from(groups, ([key, entries]) => ({
+      key,
+      name: entries[0].album,
+      artist: entries[0].artist,
+      year: entries.find((track) => track.year)?.year || null,
+      count: entries.length,
+      coverUrl: entries.find((track) => track.coverUrl)?.coverUrl || null,
+    })).sort((left, right) => left.name.localeCompare(right.name, 'hu'))
+  }, [tracks])
+
+  const matchingArtists = useMemo(() => artistCollections.filter((artist) =>
+    !query || artist.name.toLocaleLowerCase('hu').includes(query.toLocaleLowerCase('hu'))), [artistCollections, query])
+  const matchingAlbums = useMemo(() => albumCollections.filter((album) =>
+    !query || `${album.name} ${album.artist}`.toLocaleLowerCase('hu').includes(query.toLocaleLowerCase('hu'))), [albumCollections, query])
+
   const visibleTracks = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase('hu')
     const activePlaylist = view.startsWith('playlist:')
@@ -113,20 +258,22 @@ export default function App() {
       : undefined
     const source = view === 'favorites' ? tracks.filter((track) => favorites.includes(track.id))
       : view === 'recent' ? recent.map((id) => tracks.find((track) => track.id === id)).filter((track): track is Track => !!track)
-        : activePlaylist ? activePlaylist.trackIds.map((id) => tracks.find((track) => track.id === id)).filter((track): track is Track => !!track)
-          : tracks
-    return tracks.filter((track) => {
-      const matchesView = source.some((item) => item.id === track.id)
-      const matchesSearch = !normalizedQuery ||
-        `${track.title} ${track.artist} ${track.album}`.toLocaleLowerCase('hu').includes(normalizedQuery)
-      return matchesView && matchesSearch
-    })
-  }, [favorites, playlists, query, recent, tracks, view])
+        : view === 'queue' ? queue.map((id) => tracks.find((track) => track.id === id)).filter((track): track is Track => !!track)
+          : view === 'discover' ? recommendedTracks
+            : view === 'artist' ? tracks.filter((track) => track.artist === selectedArtist)
+              : view === 'album' ? tracks.filter((track) => track.artist === selectedArtist && track.album === selectedAlbum)
+                : activePlaylist ? activePlaylist.trackIds.map((id) => tracks.find((track) => track.id === id)).filter((track): track is Track => !!track)
+                  : tracks
+    const filtered = source.filter((track) => !normalizedQuery ||
+      `${track.title} ${track.artist} ${track.album} ${track.genre || ''}`.toLocaleLowerCase('hu').includes(normalizedQuery))
+    if (sortBy === 'custom' || view === 'recent' || view === 'queue' || activePlaylist) return filtered
+    return [...filtered].sort((left, right) => left[sortBy].localeCompare(right[sortBy], 'hu'))
+  }, [favorites, playlists, query, queue, recent, recommendedTracks, selectedAlbum, selectedArtist, sortBy, tracks, view])
 
   const activePlaylist = view.startsWith('playlist:')
     ? playlists.find((playlist) => `playlist:${playlist.id}` === view)
     : undefined
-  const viewTitle = activePlaylist?.name || (view === 'favorites' ? 'KEDVENCEK' : view === 'recent' ? 'LEGUTÓBBI' : 'ÖSSZES ZENE')
+  const viewTitle = view === 'admin' ? 'ADMINISZTRÁCIÓ' : view === 'artists' ? 'ELŐADÓK' : view === 'albums' ? 'ALBUMOK' : view === 'discover' ? 'FELFEDEZÉS' : view === 'queue' ? 'LEJÁTSZÁSI SOR' : view === 'artist' ? selectedArtist : view === 'album' ? selectedAlbum : activePlaylist?.name || (view === 'favorites' ? 'KEDVENCEK' : view === 'recent' ? 'LEGUTÓBBI' : 'ÖSSZES ZENE')
 
   function playTrack(track: Track) {
     if (current?.id === track.id) setPlaying(!playing)
@@ -134,31 +281,62 @@ export default function App() {
       setCurrent(track)
       setPlaying(true)
       setTime(0)
+      setQueue((saved) => saved.filter((id) => id !== track.id))
       setRecent((saved) => [track.id, ...saved.filter((id) => id !== track.id)].slice(0, 40))
     }
   }
 
   function playRelative(offset: number, automatic = false) {
-    const queue = visibleTracks.length ? visibleTracks : tracks
-    if (!queue.length) return
-    const index = current ? queue.findIndex((track) => track.id === current.id) : -1
-    if (automatic && repeat === 'off' && index === queue.length - 1) {
+    if (offset > 0) {
+      const queuedTrack = queue.map((id) => tracks.find((track) => track.id === id)).find((track): track is Track => !!track)
+      if (queuedTrack) {
+        setQueue((saved) => saved.filter((id) => id !== queuedTrack.id))
+        setCurrent(queuedTrack)
+        setPlaying(true)
+        setTime(0)
+        setRecent((saved) => [queuedTrack.id, ...saved.filter((id) => id !== queuedTrack.id)].slice(0, 40))
+        return
+      }
+    }
+    const playOrder = visibleTracks.length ? visibleTracks : tracks
+    if (!playOrder.length) return
+    const index = current ? playOrder.findIndex((track) => track.id === current.id) : -1
+    if (automatic && repeat === 'off' && index === playOrder.length - 1) {
       setPlaying(false)
       return
     }
     let nextIndex = index + offset
-    if (shuffle && offset > 0 && queue.length > 1) {
-      nextIndex = Math.floor(Math.random() * (queue.length - 1))
+    if (shuffle && offset > 0 && playOrder.length > 1) {
+      nextIndex = Math.floor(Math.random() * (playOrder.length - 1))
       if (nextIndex >= index) nextIndex += 1
-    } else if (nextIndex < 0 || nextIndex >= queue.length) {
-      nextIndex = (nextIndex + queue.length) % queue.length
+    } else if (nextIndex < 0 || nextIndex >= playOrder.length) {
+      nextIndex = (nextIndex + playOrder.length) % playOrder.length
     }
-    const nextTrack = queue[nextIndex]
+    const nextTrack = playOrder[nextIndex]
     if (!nextTrack) return
     setCurrent(nextTrack)
     setPlaying(true)
     setTime(0)
     setRecent((saved) => [nextTrack.id, ...saved.filter((id) => id !== nextTrack.id)].slice(0, 40))
+  }
+
+  function addToQueue(track: Track) {
+    if (track.id !== current?.id) setQueue((saved) => saved.includes(track.id) ? saved : [...saved, track.id])
+  }
+
+  function removeFromQueue(track: Track) {
+    setQueue((saved) => saved.filter((id) => id !== track.id))
+  }
+
+  function moveQueuedTrack(track: Track, offset: number) {
+    setQueue((saved) => {
+      const from = saved.indexOf(track.id)
+      const to = from + offset
+      if (from < 0 || to < 0 || to >= saved.length) return saved
+      const reordered = [...saved]
+      ;[reordered[from], reordered[to]] = [reordered[to], reordered[from]]
+      return reordered
+    })
   }
 
   function toggleFavorite(track: Track) {
@@ -173,25 +351,57 @@ export default function App() {
     setTime(nextTime)
   }
 
-  function createPlaylist(event: ChangeEvent<HTMLFormElement>) {
+  async function updateSharedPlaylists(route: string, method: string, body?: unknown) {
+    setActionError('')
+    try {
+      const response = await fetch(route, {
+        method,
+        ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+      })
+      const result = await response.json() as { playlists?: Playlist[]; error?: string }
+      if (!response.ok || !result.playlists) throw new Error(result.error || 'A lejátszási lista módosítása nem sikerült.')
+      setPlaylists(result.playlists)
+      return result.playlists
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : 'Nem sikerült kapcsolódni a szerverhez.')
+      return null
+    }
+  }
+
+  async function createPlaylist(event: ChangeEvent<HTMLFormElement>) {
     event.preventDefault()
     const name = playlistName.trim()
     if (!name) return
-    const playlist = { id: crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`, name, trackIds: [] }
-    setPlaylists((saved) => [...saved, playlist])
+    const updated = await updateSharedPlaylists('/api/me/playlists', 'POST', { name })
+    const playlist = updated?.at(-1)
+    if (!playlist) return
     setView(`playlist:${playlist.id}`)
     setPlaylistName('')
     setCreatingPlaylist(false)
   }
 
-  function addToPlaylist(playlistId: string, track: Track) {
-    setPlaylists((saved) => saved.map((playlist) => playlist.id === playlistId && !playlist.trackIds.includes(track.id)
-      ? { ...playlist, trackIds: [...playlist.trackIds, track.id] }
-      : playlist))
+  async function addToPlaylist(playlistId: string, track: Track) {
+    const playlist = playlists.find((entry) => entry.id === playlistId)
+    if (!playlist || playlist.trackIds.includes(track.id)) return
+    await updateSharedPlaylists(`/api/me/playlists/${encodeURIComponent(playlistId)}/tracks`, 'POST', { trackId: track.id })
   }
 
-  function deletePlaylist(playlist: Playlist) {
-    setPlaylists((saved) => saved.filter((item) => item.id !== playlist.id))
+  async function savePlaylistRename(event: ChangeEvent<HTMLFormElement>, playlistId: string) {
+    event.preventDefault()
+    const name = editingPlaylistName.trim()
+    if (!name) return
+    if (!await updateSharedPlaylists(`/api/me/playlists/${encodeURIComponent(playlistId)}`, 'PATCH', { name })) return
+    setEditingPlaylistId('')
+    setEditingPlaylistName('')
+  }
+
+  async function removeFromPlaylist(track: Track) {
+    if (!activePlaylist) return
+    await updateSharedPlaylists(`/api/me/playlists/${encodeURIComponent(activePlaylist.id)}/tracks/${encodeURIComponent(track.id)}`, 'DELETE')
+  }
+
+  async function deletePlaylist(playlist: Playlist) {
+    if (!await updateSharedPlaylists(`/api/me/playlists/${encodeURIComponent(playlist.id)}`, 'DELETE')) return
     if (view === `playlist:${playlist.id}`) setView('all')
   }
 
@@ -203,6 +413,13 @@ export default function App() {
     }
     playRelative(1, true)
   }
+
+  const headingTitle = activePlaylist?.name || (view === 'favorites' ? 'A te kedvenceid' : view === 'recent' ? 'Nemrég hallgatva' : view === 'queue' ? 'Lejátszási sor' : view === 'artists' ? 'Előadók' : view === 'albums' ? 'Albumok' : view === 'discover' ? 'Felfedezés' : view === 'artist' ? selectedArtist : view === 'album' ? selectedAlbum : 'Saját hangzás')
+  const headingSubtitle = activePlaylist ? `${activePlaylist.trackIds.length} zeneszám a listában.` : view === 'favorites' ? 'A dalok, amik újra és újra hazatalálnak.' : view === 'recent' ? 'A legutóbb lejátszott dalaid.' : view === 'queue' ? `${queue.length} zeneszám várakozik.` : view === 'artists' ? `${artistCollections.length} előadó a könyvtáradban.` : view === 'albums' ? `${albumCollections.length} album a gyűjteményedben.` : view === 'discover' ? 'Válogatás a hallgatási szokásaid alapján.' : view === 'artist' ? `${visibleTracks.length} zeneszám ettől az előadótól.` : view === 'album' ? `${visibleTracks.length} zeneszám ezen az albumon.` : 'A gyűjteményed, bárhol is vagy.'
+  const sectionTitle = query ? 'Találatok' : activePlaylist?.name || (view === 'favorites' ? 'Kedvenc zenék' : view === 'recent' ? 'Legutóbb játszott' : view === 'queue' ? 'Következik' : view === 'discover' ? 'Neked válogattuk' : view === 'artist' || view === 'album' ? 'Zeneszámok' : 'A gyűjteményed')
+
+  if (!authReady) return <main className="auth-loading"><LoaderCircle className="spin" size={24} /><span>Kapcsolódás a saját szerverhez...</span></main>
+  if (!user) return <AuthScreen status={authStatus} onSignedIn={signIn} />
 
   return (
     <div className="app-shell">
@@ -224,14 +441,26 @@ export default function App() {
           <button className={view === 'recent' ? 'nav-item active' : 'nav-item'} onClick={() => setView('recent')}>
             <Clock3 size={18} /> <span>Legutóbb játszott</span>
           </button>
+          <button className={view === 'queue' ? 'nav-item active' : 'nav-item'} onClick={() => setView('queue')}><ListMusic size={18} /><span>Lejátszási sor</span><span className="nav-count">{queue.length}</span></button>
+          <button className={view === 'discover' ? 'nav-item active' : 'nav-item'} onClick={() => setView('discover')}><AudioLines size={18} /><span>Felfedezés</span></button>
+          <button className={view === 'albums' ? 'nav-item active' : 'nav-item'} onClick={() => setView('albums')}><Disc3 size={18} /><span>Albumok</span></button>
+          <button className={view === 'artists' ? 'nav-item active' : 'nav-item'} onClick={() => setView('artists')}><Radio size={18} /><span>Előadók</span></button>
+          {user.role === 'admin' ? <button className={view === 'admin' ? 'nav-item active' : 'nav-item'} onClick={() => setView('admin')}><ShieldCheck size={18} /><span>Adminisztráció</span></button> : null}
         </nav>
 
         <div className="playlist-heading"><span className="nav-label">LEJÁTSZÁSI LISTÁK</span><button className="add-playlist" aria-label="Új lejátszási lista" title="Új lejátszási lista" onClick={() => setCreatingPlaylist(!creatingPlaylist)}><Plus size={16} /></button></div>
         {creatingPlaylist ? <form className="playlist-form" onSubmit={createPlaylist}><input autoFocus aria-label="Lista neve" placeholder="Lista neve" value={playlistName} onChange={(event) => setPlaylistName(event.target.value)} /><button aria-label="Létrehozás" type="submit"><Plus size={15} /></button></form> : null}
         <nav className="playlist-nav" aria-label="Lejátszási listák">
           {playlists.map((playlist) => <div className="playlist-link-row" key={playlist.id}>
-            <button className={view === `playlist:${playlist.id}` ? 'nav-item active' : 'nav-item'} onClick={() => setView(`playlist:${playlist.id}`)}><ListMusic size={17} /><span>{playlist.name}</span></button>
-            <button className="delete-playlist" aria-label={`${playlist.name} törlése`} title="Lista törlése" onClick={() => deletePlaylist(playlist)}><Trash2 size={14} /></button>
+            {editingPlaylistId === playlist.id ? <form className="playlist-rename-form" onSubmit={(event) => savePlaylistRename(event, playlist.id)}>
+              <input autoFocus aria-label={`${playlist.name} új neve`} value={editingPlaylistName} onChange={(event) => setEditingPlaylistName(event.target.value)} maxLength={80} />
+              <button type="submit" aria-label="Név mentése" title="Mentés"><Check size={14} /></button>
+              <button type="button" aria-label="Átnevezés megszakítása" title="Mégse" onClick={() => setEditingPlaylistId('')}><X size={14} /></button>
+            </form> : <>
+              <button className={view === `playlist:${playlist.id}` ? 'nav-item active' : 'nav-item'} onClick={() => setView(`playlist:${playlist.id}`)}><ListMusic size={17} /><span>{playlist.name}</span></button>
+              <button className="rename-playlist" aria-label={`${playlist.name} átnevezése`} title="Lista átnevezése" onClick={() => { setEditingPlaylistId(playlist.id); setEditingPlaylistName(playlist.name) }}><Pencil size={13} /></button>
+              <button className="delete-playlist" aria-label={`${playlist.name} törlése`} title="Lista törlése" onClick={() => deletePlaylist(playlist)}><Trash2 size={14} /></button>
+            </>}
           </div>)}
         </nav>
 
@@ -255,34 +484,46 @@ export default function App() {
           <button className="icon-button refresh-button" aria-label="Könyvtár frissítése" title="Könyvtár frissítése" onClick={() => void loadLibrary()} disabled={loading}>
             {loading ? <LoaderCircle className="spin" size={18} /> : <RefreshCw size={17} />}
           </button>
+          <div className="account-actions"><div><strong>{user.name}</strong><small>{user.role === 'admin' ? 'Adminisztrátor' : 'Fiók'}</small></div><ProfileSwitcher user={user} onProfileChanged={switchProfile} /><button className="icon-button" aria-label="Kijelentkezés" title="Kijelentkezés" onClick={() => void signOut()}><LogOut size={17} /></button></div>
         </header>
 
-        <div className="content-wrap">
+        {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
+        {view === 'admin' ? <AdminPanel onLibraryChanged={loadLibrary} /> : <div className="content-wrap">
           <section className="library-heading">
             <div className="eyebrow"><span className="eyebrow-line" /> PRIVÁT ZENEKÖNYVTÁR</div>
             <div className="heading-row">
               <div>
-                <h1>{activePlaylist ? <>{activePlaylist.name}<span>.</span></> : view === 'favorites' ? <>A te <span>kedvenceid.</span></> : view === 'recent' ? <>Nemrég <span>hallgatva.</span></> : <>Saját <span>hangzás.</span></>}</h1>
-                <p className="subheading">{activePlaylist ? `${activePlaylist.trackIds.length} zeneszám a listában.` : view === 'favorites' ? 'A dalok, amik újra és újra hazatalálnak.' : view === 'recent' ? 'A legutóbb lejátszott dalaid.' : 'A gyűjteményed, bárhol is vagy.'}</p>
+                <h1>{headingTitle}<span>.</span></h1>
+                <p className="subheading">{headingSubtitle}</p>
               </div>
               <div className="library-stat"><strong>{visibleTracks.length}</strong><span>ZENESZÁM</span></div>
             </div>
           </section>
 
-          <section className="collection-section">
+          {view === 'artists' ? <section className="collection-grid" aria-label="Előadók">
+            {matchingArtists.length ? matchingArtists.map((artist) => <button className="collection-card" key={artist.name} onClick={() => { setSelectedArtist(artist.name); setView('artist') }}>
+              <span className="collection-art artist-art">{artist.coverUrl ? <img src={artist.coverUrl} alt="" loading="lazy" /> : <Radio size={25} />}</span>
+              <strong>{artist.name}</strong><small>{artist.count} zeneszám</small>
+            </button>) : <div className="empty-state"><strong>{query ? 'Nincs ilyen előadó.' : 'Még nincs előadó a könyvtárban.'}</strong><p>{query ? 'Próbálj másik keresést.' : 'A zenefájlok metaadataiból vagy mappaneveiből épül fel ez a lista.'}</p></div>}
+          </section> : view === 'albums' ? <section className="collection-grid" aria-label="Albumok">
+            {matchingAlbums.length ? matchingAlbums.map((album) => <button className="collection-card" key={album.key} onClick={() => { setSelectedArtist(album.artist); setSelectedAlbum(album.name); setView('album') }}>
+              <span className="collection-art">{album.coverUrl ? <img src={album.coverUrl} alt="" loading="lazy" /> : <Disc3 size={25} />}</span>
+              <strong>{album.name}</strong><small>{album.artist}{album.year ? ` · ${album.year}` : ''}</small>
+            </button>) : <div className="empty-state"><strong>{query ? 'Nincs ilyen album.' : 'Még nincs album a könyvtárban.'}</strong><p>{query ? 'Próbálj másik keresést.' : 'A zenefájlok metaadataiból vagy mappaneveiből épül fel ez a lista.'}</p></div>}
+          </section> : <section className="collection-section">
             <div className="section-heading">
-              <div><span className="section-icon"><ListMusic size={16} /></span><h2>{query ? 'Találatok' : activePlaylist?.name || (view === 'favorites' ? 'Kedvenc zenék' : view === 'recent' ? 'Legutóbb játszott' : 'A gyűjteményed')}</h2></div>
-              <span className="track-total">{visibleTracks.length} DAL</span>
+              <div><span className="section-icon"><ListMusic size={16} /></span><h2>{sectionTitle}</h2></div>
+              <div className="section-tools"><label className="sort-select"><span>RENDEZÉS</span><select aria-label="Rendezés" value={sortBy} onChange={(event) => setSortBy(event.target.value as SortBy)}><option value="custom">Alapértelmezett</option><option value="title">Cím szerint</option><option value="artist">Előadó szerint</option><option value="album">Album szerint</option></select></label><span className="track-total">{visibleTracks.length} DAL</span></div>
             </div>
 
-            <div className="track-head" aria-hidden="true"><span>#</span><span>CÍM</span><span>ALBUM / HELY</span><span>MÉRET</span><span /><span /></div>
+            <div className="track-head" aria-hidden="true"><span>#</span><span>CÍM</span><span>ALBUM</span><span>IDŐ</span><span /><span /><span /></div>
             {loading ? <div className="empty-state"><LoaderCircle className="spin" size={24} /><p>Könyvtár betöltése...</p></div> : null}
             {!loading && error ? <div className="empty-state"><Radio size={27} /><p>{error}</p><button className="text-action" onClick={() => void loadLibrary()}>Újrapróbálás</button></div> : null}
             {!loading && !error && visibleTracks.length === 0 ? (
               <div className="empty-state">
                 <div className="empty-disc"><Music2 size={25} /></div>
-                <strong>{tracks.length === 0 ? 'Itt még csend van.' : view === 'favorites' ? 'Még nincsenek kedvenceid.' : view === 'recent' ? 'Még nincs lejátszási előzmény.' : activePlaylist ? 'Ez a lista még üres.' : 'Nincs ilyen találat.'}</strong>
-                <p>{tracks.length === 0 ? 'Tegyél MP3, FLAC, OGG, WAV vagy M4A fájlokat a szerver music mappájába, aztán frissítsd a könyvtárat.' : view === 'favorites' ? 'A szív ikonra koppintva elmentheted a kedvenc dalaidat.' : activePlaylist ? 'A dalok melletti lista ikonra koppintva adhatsz hozzá zenét.' : view === 'recent' ? 'Indíts el egy zenét, és itt megtalálod.' : 'Próbálj másik keresőkifejezést.'}</p>
+                <strong>{tracks.length === 0 ? 'Itt még csend van.' : view === 'favorites' ? 'Még nincsenek kedvenceid.' : view === 'recent' ? 'Még nincs lejátszási előzmény.' : view === 'queue' ? 'A lejátszási sor üres.' : activePlaylist ? 'Ez a lista még üres.' : 'Nincs találat.'}</strong>
+                <p>{tracks.length === 0 ? 'Tegyél zenefájlokat a szerver könyvtárába, aztán frissítsd a gyűjteményt.' : view === 'favorites' ? 'A szív ikonra koppintva elmentheted a kedvenc dalaidat.' : view === 'queue' ? 'A dalok melletti sor ikonnal tehetsz zenét a következők közé.' : activePlaylist ? 'A dalok melletti lista ikonnal adhatsz hozzá zenét.' : view === 'recent' ? 'Indíts el egy zenét, és itt megtalálod.' : 'Próbálj másik keresőkifejezést.'}</p>
               </div>
             ) : null}
 
@@ -290,17 +531,25 @@ export default function App() {
               {visibleTracks.map((track, index) => {
                 const isCurrent = current?.id === track.id
                 const isFavorite = favorites.includes(track.id)
+                const queueIndex = queue.indexOf(track.id)
                 return (
                   <div className={isCurrent ? 'track-row current' : 'track-row'} key={track.id}>
                     <button className="track-number" aria-label={`${track.title} lejátszása`} onClick={() => playTrack(track)}>
                       {isCurrent && playing ? <AudioLines size={17} className="playing-bars" /> : isCurrent ? <Pause size={16} /> : <><span className="row-index">{String(index + 1).padStart(2, '0')}</span><Play size={15} className="row-play" fill="currentColor" /></>}
                     </button>
                     <button className="track-title" onClick={() => playTrack(track)}>
-                      <span className="cover-thumb"><Music2 size={17} /></span>
+                      <span className="cover-thumb">{track.coverUrl ? <img src={track.coverUrl} alt="" loading="lazy" /> : <Music2 size={17} />}</span>
                       <span className="track-copy"><strong>{track.title}</strong><small>{track.artist}</small></span>
                     </button>
-                    <span className="track-album">{track.album}</span>
-                    <span className="track-size">{formatSize(track.size)}</span>
+                    <span className="track-album">{track.album}<small>{track.year || track.genre || ''}</small></span>
+                    <span className="track-size" title={formatSize(track.size)}>{track.duration ? formatTime(track.duration) : '--:--'}</span>
+                    <div className="row-actions">
+                      {view === 'queue' ? <>
+                        <button aria-label="Fel a sorban" title="Fel a sorban" disabled={queueIndex <= 0} onClick={() => moveQueuedTrack(track, -1)}><ArrowUp size={14} /></button>
+                        <button aria-label="Le a sorban" title="Le a sorban" disabled={queueIndex < 0 || queueIndex >= queue.length - 1} onClick={() => moveQueuedTrack(track, 1)}><ArrowDown size={14} /></button>
+                        <button aria-label="Eltávolítás a lejátszási sorból" title="Eltávolítás a sorból" onClick={() => removeFromQueue(track)}><Trash2 size={15} /></button>
+                      </> : activePlaylist ? <button aria-label="Eltávolítás a lejátszási listából" title="Eltávolítás a listából" onClick={() => removeFromPlaylist(track)}><Trash2 size={15} /></button> : <button aria-label="Hozzáadás a lejátszási sorhoz" title="Hozzáadás a sorhoz" onClick={() => addToQueue(track)}><ListMusic size={16} /></button>}
+                    </div>
                     <details className="add-to-playlist"><summary aria-label="Hozzáadás lejátszási listához" title="Hozzáadás listához"><ListPlus size={17} /></summary><div className="playlist-menu">{playlists.length ? playlists.map((playlist) => <button key={playlist.id} onClick={() => addToPlaylist(playlist.id, track)}>{playlist.name}{playlist.trackIds.includes(track.id) ? ' ✓' : ''}</button>) : <button onClick={() => { setCreatingPlaylist(true); setView('all') }}>Új lista létrehozása</button>}</div></details>
                     <button className={isFavorite ? 'favorite-button liked' : 'favorite-button'} aria-label={isFavorite ? 'Eltávolítás a kedvencekből' : 'Hozzáadás a kedvencekhez'} title={isFavorite ? 'Eltávolítás a kedvencekből' : 'Kedvencekhez adás'} onClick={() => toggleFavorite(track)}>
                       <Heart size={17} fill={isFavorite ? 'currentColor' : 'none'} />
@@ -309,15 +558,15 @@ export default function App() {
                 )
               })}
             </div>
-          </section>
+          </section>}
 
           <footer className="page-footer"><span>HANGTÁR <span className="footer-dot">·</span> PRIVÁTAN, SAJÁT SZERVEREDRŐL</span><span>MP3 · FLAC · OGG · WAV · M4A</span></footer>
-        </div>
+        </div>}
       </main>
 
       <section className="player" aria-label="Zenelejátszó">
         <div className="now-playing">
-          <div className={current ? 'player-art has-track' : 'player-art'}>{current ? <Music2 size={20} /> : <Disc3 size={21} />}</div>
+          <div className={current ? 'player-art has-track' : 'player-art'}>{current?.coverUrl ? <img src={current.coverUrl} alt="" /> : current ? <Music2 size={20} /> : <Disc3 size={21} />}</div>
           <div className="now-copy"><strong>{current?.title || 'Válassz egy zenét'}</strong><small>{current?.artist || 'A lejátszód készen áll'}</small></div>
           {current ? <button className={favorites.includes(current.id) ? 'player-heart liked' : 'player-heart'} aria-label="Kedvencekhez adás" onClick={() => toggleFavorite(current)}><Heart size={17} fill={favorites.includes(current.id) ? 'currentColor' : 'none'} /></button> : null}
         </div>

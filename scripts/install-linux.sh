@@ -49,14 +49,16 @@ fi
 install -d -o root -g root -m 0755 "$APP_DIR/server" "$APP_DIR/dist"
 cp -a "$SOURCE_DIR/server/." "$APP_DIR/server/"
 cp -a "$SOURCE_DIR/dist/." "$APP_DIR/dist/"
+install -o root -g root -m 0644 "$SOURCE_DIR/package.json" "$SOURCE_DIR/package-lock.json" "$APP_DIR/"
+npm ci --omit=dev --prefix "$APP_DIR"
 chown -R root:root "$APP_DIR"
 find "$APP_DIR" -type d -exec chmod 0755 {} +
 find "$APP_DIR" -type f -exec chmod 0644 {} +
 
-install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$DATA_DIR/music"
+install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$DATA_DIR" "$DATA_DIR/music"
 install -d -o root -g root -m 0755 /etc/hangtar
 if [[ ! -f /etc/hangtar/hangtar.env ]]; then
-  printf 'HOST=127.0.0.1\nPORT=4000\nMUSIC_DIR=%s/music\n' "$DATA_DIR" > /etc/hangtar/hangtar.env
+  printf 'HOST=127.0.0.1\nPORT=4000\nDATA_DIR=%s\nMUSIC_DIR=%s/music\n' "$DATA_DIR" "$DATA_DIR" > /etc/hangtar/hangtar.env
   chmod 0640 /etc/hangtar/hangtar.env
   chown root:"$SERVICE_USER" /etc/hangtar/hangtar.env
 fi
@@ -80,7 +82,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadOnlyPaths=$APP_DIR
-ReadOnlyPaths=$DATA_DIR/music
+ReadWritePaths=$DATA_DIR
 RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
@@ -92,5 +94,6 @@ systemctl daemon-reload
 systemctl enable --now hangtar.service
 echo "HANGTAR telepítve és elindítva."
 echo "Könyvtár: $DATA_DIR/music"
+echo "Első admin telepítőkulcs: sudo cat $DATA_DIR/bootstrap-token"
 echo "Állapot: sudo systemctl status hangtar"
 echo "Beállítások: /etc/hangtar/hangtar.env"

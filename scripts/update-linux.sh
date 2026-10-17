@@ -27,6 +27,8 @@ fi
 install -d -o root -g root -m 0755 "$APP_DIR/server" "$APP_DIR/dist"
 cp -a "$SOURCE_DIR/server/." "$APP_DIR/server/"
 cp -a "$SOURCE_DIR/dist/." "$APP_DIR/dist/"
+install -o root -g root -m 0644 "$SOURCE_DIR/package.json" "$SOURCE_DIR/package-lock.json" "$APP_DIR/"
+npm ci --omit=dev --prefix "$APP_DIR"
 chown -R root:root "$APP_DIR"
 find "$APP_DIR" -type d -exec chmod 0755 {} +
 find "$APP_DIR" -type f -exec chmod 0644 {} +

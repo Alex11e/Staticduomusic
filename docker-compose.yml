@@ -6,7 +6,9 @@ services:
       - "4000:4000"
     environment:
       PORT: 4000
+      DATA_DIR: /data
       MUSIC_DIR: /music
     volumes:
-      - ./music:/music:ro
+      - ./data:/data
+      - ./music:/music
     restart: unless-stopped
