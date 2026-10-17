@@ -1,0 +1,12 @@
+services:
+  hangtar:
+    build: .
+    container_name: hangtar
+    ports:
+      - "4000:4000"
+    environment:
+      PORT: 4000
+      MUSIC_DIR: /music
+    volumes:
+      - ./music:/music:ro
+    restart: unless-stopped
