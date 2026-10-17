@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
-import type { ChangeEvent } from 'react'
-import { Activity, HardDrive, LoaderCircle, Music2, RefreshCw, ShieldCheck, Trash2, Upload, Users } from 'lucide-react'
+import type { ChangeEvent, FormEvent } from 'react'
+import { Activity, Captions, Download, ExternalLink, HardDrive, LoaderCircle, Music2, RefreshCw, Search, ShieldCheck, Trash2, Upload, Users } from 'lucide-react'
 import type { SessionUser } from './AuthScreen'
 
 type AdminStats = { users: number; tracks: number; storageBytes: number }
 type AdminTrack = { id: string; title: string; artist: string; album: string; size: number }
+type MusicSource = 'archive' | 'jamendo' | 'direct'
+type MusicSourceTrack = { source: 'archive' | 'jamendo'; id: string; fileName?: string; title: string; artist: string; album?: string; licenseUrl: string }
 type AdminPanelProps = { onLibraryChanged: () => Promise<void> }
 
 function formatBytes(bytes: number) {
@@ -19,6 +21,16 @@ export default function AdminPanel({ onLibraryChanged }: AdminPanelProps) {
   const [registrationOpen, setRegistrationOpen] = useState(true)
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
+  const [uploadingLyricsId, setUploadingLyricsId] = useState('')
+  const [musicSource, setMusicSource] = useState<MusicSource>('archive')
+  const [musicQuery, setMusicQuery] = useState('')
+  const [musicResults, setMusicResults] = useState<MusicSourceTrack[]>([])
+  const [musicSearching, setMusicSearching] = useState(false)
+  const [musicImporting, setMusicImporting] = useState('')
+  const [directUrl, setDirectUrl] = useState('')
+  const [directTitle, setDirectTitle] = useState('')
+  const [directArtist, setDirectArtist] = useState('')
+  const [rightsConfirmed, setRightsConfirmed] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
@@ -107,6 +119,73 @@ export default function AdminPanel({ onLibraryChanged }: AdminPanelProps) {
     }
   }
 
+  async function searchOnline(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setMusicSearching(true)
+    setMusicResults([])
+    setError('')
+    setNotice('')
+    try {
+      const response = await fetch('/api/admin/music/search', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: musicSource, query: musicQuery }),
+      })
+      const result = await response.json() as { error?: string; results?: MusicSourceTrack[] }
+      if (!response.ok) throw new Error(result.error || 'A keresés nem sikerült.')
+      setMusicResults(result.results || [])
+      if (!result.results?.length) setNotice('Nem található letölthető MP3 ezen a forráson.')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'A keresés nem sikerült.')
+    } finally {
+      setMusicSearching(false)
+    }
+  }
+
+  async function importOnlineTrack(track: MusicSourceTrack) {
+    const importId = `${track.source}:${track.id}:${track.fileName || ''}`
+    setMusicImporting(importId)
+    setError('')
+    setNotice('')
+    try {
+      const response = await fetch('/api/admin/music/import', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: track.source, id: track.id, fileName: track.fileName }),
+      })
+      const result = await response.json() as { error?: string; filename?: string }
+      if (!response.ok) throw new Error(result.error || 'A letöltés nem sikerült.')
+      setNotice(`${result.filename || track.title} letöltve és importálva.`)
+      await onLibraryChanged()
+      await load()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'A letöltés nem sikerült.')
+    } finally {
+      setMusicImporting('')
+    }
+  }
+
+  async function importDirectUrl(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setMusicImporting('direct')
+    setError('')
+    setNotice('')
+    try {
+      const response = await fetch('/api/admin/music/import', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'direct', url: directUrl, title: directTitle, artist: directArtist, rightsConfirmed }),
+      })
+      const result = await response.json() as { error?: string; filename?: string }
+      if (!response.ok) throw new Error(result.error || 'A letöltés nem sikerült.')
+      setNotice(`${result.filename || 'A zeneszám'} letöltve és importálva.`)
+      setDirectUrl('')
+      await onLibraryChanged()
+      await load()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'A letöltés nem sikerült.')
+    } finally {
+      setMusicImporting('')
+    }
+  }
+
   async function deleteTrack(track: AdminTrack) {
     if (!window.confirm(`Biztosan törlöd a „${track.title}” című fájlt a szerverről?`)) return
     setError('')
@@ -120,6 +199,28 @@ export default function AdminPanel({ onLibraryChanged }: AdminPanelProps) {
       await load()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'A fájl törlése nem sikerült.')
+    }
+  }
+
+  async function uploadLyrics(track: AdminTrack, event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget
+    const file = input.files?.[0]
+    if (!file) return
+    setUploadingLyricsId(track.id)
+    setError('')
+    setNotice('')
+    try {
+      const response = await fetch(`/api/admin/tracks/${encodeURIComponent(track.id)}/lyrics`, {
+        method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: file,
+      })
+      const result = await response.json() as { error?: string }
+      if (!response.ok) throw new Error(result.error || 'A dalszöveg feltöltése nem sikerült.')
+      setNotice(`${track.title} időzített dalszövege frissült.`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'A dalszöveg feltöltése nem sikerült.')
+    } finally {
+      setUploadingLyricsId('')
+      input.value = ''
     }
   }
 
@@ -160,7 +261,7 @@ export default function AdminPanel({ onLibraryChanged }: AdminPanelProps) {
       </section>
 
       <section className="admin-section">
-        <div className="admin-section-title"><div><Upload size={18} /><h2>Zenék feltöltése</h2></div><span className="admin-limit">MAX. 500 MB / FÁJL</span></div>
+        <div className="admin-section-title"><div><Upload size={18} /><h2>Zenék feltöltése</h2></div><span className="admin-limit">MAX. 10 GB / FÁJL</span></div>
         <label className={uploading ? 'upload-drop disabled' : 'upload-drop'}>
           {uploading ? <LoaderCircle className="spin" size={22} /> : <Upload size={22} />}
           <strong>{uploading ? 'Feltöltés és importálás...' : 'Válassz zenéket vagy ZIP archívumot'}</strong>
@@ -170,9 +271,44 @@ export default function AdminPanel({ onLibraryChanged }: AdminPanelProps) {
         </label>
       </section>
       <section className="admin-section">
+        <div className="admin-section-title"><div><Download size={18} /><h2>MP3 importálása az internetről</h2></div><span className="admin-limit">LICENCELT FORRÁSOK</span></div>
+        <div className="music-source-tabs" role="group" aria-label="Zeneforrás">
+          <button type="button" className={musicSource === 'archive' ? 'active' : ''} onClick={() => { setMusicSource('archive'); setMusicResults([]) }}>Internet Archive</button>
+          <button type="button" className={musicSource === 'jamendo' ? 'active' : ''} onClick={() => { setMusicSource('jamendo'); setMusicResults([]) }}>Jamendo</button>
+          <button type="button" className={musicSource === 'direct' ? 'active' : ''} onClick={() => { setMusicSource('direct'); setMusicResults([]) }}>Közvetlen URL</button>
+        </div>
+        {musicSource === 'direct' ? (
+          <form className="music-source-form" onSubmit={(event) => void importDirectUrl(event)}>
+            <input aria-label="MP3 letöltési URL" type="url" placeholder="https://archive.org/.../zeneszam.mp3" value={directUrl} onChange={(event) => setDirectUrl(event.target.value)} required />
+            <input aria-label="Dal címe" placeholder="Dal címe" value={directTitle} onChange={(event) => setDirectTitle(event.target.value)} />
+            <input aria-label="Előadó" placeholder="Előadó" value={directArtist} onChange={(event) => setDirectArtist(event.target.value)} />
+            <label className="music-source-rights"><input type="checkbox" checked={rightsConfirmed} onChange={(event) => setRightsConfirmed(event.target.checked)} required /> Jogosult vagyok a fájl letöltésére és tárolására.</label>
+            <button className="music-source-submit" type="submit" disabled={musicImporting !== ''}><Download size={15} />{musicImporting === 'direct' ? 'Letöltés...' : 'Letöltés'}</button>
+            <p className="music-source-hint">Csak HTTPS-es Archive.org vagy Jamendo forrásból származó MP3 URL használható.</p>
+          </form>
+        ) : (
+          <>
+            <form className="music-source-search" onSubmit={(event) => void searchOnline(event)}>
+              <input aria-label="Keresés cím vagy előadó szerint" type="search" placeholder="Dal címe vagy előadó" value={musicQuery} onChange={(event) => setMusicQuery(event.target.value)} required />
+              <button className="music-source-submit" type="submit" disabled={musicSearching || musicImporting !== ''}>{musicSearching ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />}{musicSearching ? 'Keresés...' : 'Keresés'}</button>
+            </form>
+            {musicSource === 'jamendo' ? <p className="music-source-hint">A Jamendo kereséshez szerveroldali JAMENDO_CLIENT_ID szükséges. Csak a letöltést engedélyező, megfelelő Creative Commons licencű zenék jelennek meg.</p> : null}
+            {musicResults.length ? <div className="music-source-results">{musicResults.map((track) => {
+              const importId = `${track.source}:${track.id}:${track.fileName || ''}`
+              return <div className="music-source-result" key={importId}>
+                <div><strong>{track.title}</strong><small>{track.artist}{track.album ? ` · ${track.album}` : ''}</small></div>
+                <a href={track.licenseUrl} target="_blank" rel="noreferrer" aria-label={`${track.title} licencének megnyitása`} title="Licenc"><ExternalLink size={15} /></a>
+                <button type="button" className="music-source-download" aria-label={`${track.title} letöltése`} title="MP3 letöltése" disabled={musicImporting !== ''} onClick={() => void importOnlineTrack(track)}>{musicImporting === importId ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}</button>
+              </div>
+            })}</div> : null}
+          </>
+        )}
+      </section>
+      <section className="admin-section">
         <div className="admin-section-title"><div><Music2 size={18} /><h2>Zenekönyvtár kezelése</h2></div><span className="admin-count">{tracks.length} ZENE</span></div>
         {tracks.length ? <div className="admin-track-list">{tracks.map((track) => <div className="admin-track-row" key={track.id}>
           <div><strong>{track.title}</strong><small>{track.artist} · {track.album} · {formatBytes(track.size)}</small></div>
+          <label className="upload-lyrics" title="Időzített LRC dalszöveg feltöltése"><Captions size={16} /><input type="file" accept=".lrc,text/plain" aria-label={`${track.title} időzített dalszövegének feltöltése`} disabled={uploadingLyricsId !== ''} onChange={(event) => void uploadLyrics(track, event)} /></label>
           <button className="delete-track" aria-label={`${track.title} törlése`} title="Zenefájl törlése" onClick={() => void deleteTrack(track)}><Trash2 size={16} /></button>
         </div>)}</div> : <p className="admin-empty">A könyvtár még üres.</p>}
       </section>

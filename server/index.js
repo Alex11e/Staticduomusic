@@ -3,9 +3,11 @@ import { createReadStream, createWriteStream } from 'node:fs'
 import { lstat, mkdir, open, readFile, readdir, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto'
 import path from 'node:path'
-import { Transform } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
+import { isAllowedDownloadUrl, resolveMusicDownload, searchInternetArchive, searchJamendo } from './music-sources.js'
+import { maxLyricsBytes, parseLrc } from './lyrics.js'
   import { parseFile } from 'music-metadata'
   import yauzl from 'yauzl'
 
@@ -19,10 +21,10 @@ const port = Number(process.env.PORT || 4000)
 const host = process.env.HOST || '0.0.0.0'
 const sessionLifetime = 30 * 24 * 60 * 60 * 1000
 const maxProfilesPerAccount = 10
-const maxUploadBytes = 500 * 1024 * 1024
+const maxUploadBytes = 10 * 1024 * 1024 * 1024
 const maxArchiveEntries = 5000
-const maxArchiveFileBytes = 500 * 1024 * 1024
-const maxArchiveExtractedBytes = 2 * 1024 * 1024 * 1024
+const maxArchiveFileBytes = 10 * 1024 * 1024 * 1024
+const maxArchiveExtractedBytes = 10 * 1024 * 1024 * 1024
 const mimeTypes = {
   '.aac': 'audio/aac',
   '.flac': 'audio/flac',
@@ -41,7 +43,10 @@ function defaultStore() {
 }
 
 function defaultProfileState() {
-  return { favorites: [], recent: [], queue: [], volume: 0.8 }
+  return {
+    favorites: [], recent: [], queue: [], volume: 0.8,
+    playback: { trackId: '', position: 0, playing: false, shuffle: false, repeat: 'off' },
+  }
 }
 
 let store = defaultStore()
@@ -229,6 +234,17 @@ async function readJson(request, limit = 64 * 1024) {
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) }
   catch { throw Object.assign(new Error('Hibás JSON kérés.'), { status: 400 }) }
+}
+
+async function readText(request, limit) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of request) {
+    size += chunk.length
+    if (size > limit) throw Object.assign(new Error('A dalszöveg fájl legfeljebb 512 KB lehet.'), { status: 413 })
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks).toString('utf8')
 }
 
 function cookieForUser(request, user) {
@@ -449,9 +465,9 @@ async function extractAudioArchive(archivePath) {
           zipFile.readEntry()
           return
         }
-        if (entry.uncompressedSize > maxArchiveFileBytes) throw archiveError('Egy kicsomagolt zenefájl legfeljebb 500 MB lehet.', 413)
+        if (entry.uncompressedSize > maxArchiveFileBytes) throw archiveError('Egy kicsomagolt zenefájl legfeljebb 10 GB lehet.', 413)
         declaredBytes += entry.uncompressedSize
-        if (declaredBytes > maxArchiveExtractedBytes) throw archiveError('Az archívum kicsomagolt mérete meghaladja a 2 GB-ot.', 413)
+        if (declaredBytes > maxArchiveExtractedBytes) throw archiveError('Az archívum kicsomagolt mérete meghaladja a 10 GB-ot.', 413)
 
         await ensureArchiveDirectories(parts.slice(0, -1), createdDirectories)
         const fileHandle = await open(destination, 'wx', 0o640)
@@ -488,7 +504,7 @@ async function extractAudioArchive(archivePath) {
 async function saveUploadedArchive(request, response) {
   const contentLength = Number(request.headers['content-length'] || 0)
   if (contentLength > maxUploadBytes) {
-    sendJson(response, 413, { error: 'A ZIP fájl legfeljebb 500 MB lehet.' })
+    sendJson(response, 413, { error: 'A ZIP fájl legfeljebb 10 GB lehet.' })
     request.resume()
     return
   }
@@ -498,7 +514,7 @@ async function saveUploadedArchive(request, response) {
   const sizeLimit = new Transform({
     transform(chunk, encoding, callback) {
       uploadedBytes += chunk.length
-      callback(uploadedBytes > maxUploadBytes ? archiveError('A ZIP fájl legfeljebb 500 MB lehet.', 413) : null, chunk)
+      callback(uploadedBytes > maxUploadBytes ? archiveError('A ZIP fájl legfeljebb 10 GB lehet.', 413) : null, chunk)
     },
   })
   try {
@@ -530,7 +546,7 @@ async function saveUploadedTrack(request, response, url) {
   const filePath = path.join(musicDir, filename)
   const contentLength = Number(request.headers['content-length'] || 0)
   if (contentLength > maxUploadBytes) {
-    sendJson(response, 413, { error: 'A fájl legfeljebb 500 MB lehet.' })
+    sendJson(response, 413, { error: 'A fájl legfeljebb 10 GB lehet.' })
     request.resume()
     return
   }
@@ -539,7 +555,7 @@ async function saveUploadedTrack(request, response, url) {
   const sizeLimit = new Transform({
     transform(chunk, encoding, callback) {
       uploadedBytes += chunk.length
-      callback(uploadedBytes > maxUploadBytes ? Object.assign(new Error('A fájl legfeljebb 500 MB lehet.'), { status: 413 }) : null, chunk)
+      callback(uploadedBytes > maxUploadBytes ? Object.assign(new Error('A fájl legfeljebb 10 GB lehet.'), { status: 413 }) : null, chunk)
     },
   })
   let createdFile = false
@@ -552,6 +568,70 @@ async function saveUploadedTrack(request, response, url) {
     if (createdFile) await unlink(filePath).catch(() => {})
     const status = error.code === 'EEXIST' ? 409 : error.status || 500
     sendJson(response, status, { error: status === 409 ? 'Már létezik ilyen nevű fájl.' : error.message || 'A feltöltés nem sikerült.' })
+  }
+}
+
+async function saveOnlineTrack(body, response) {
+  if (body.source === 'direct' && body.rightsConfirmed !== true) {
+    sendJson(response, 400, { error: 'Erősítsd meg, hogy jogosult vagy a fájl letöltésére.' })
+    return
+  }
+
+  let track
+  try {
+    track = await resolveMusicDownload(body, process.env.JAMENDO_CLIENT_ID)
+  } catch (error) {
+    sendJson(response, 400, { error: error.message || 'A zeneszám nem tölthető le.' })
+    return
+  }
+
+  let remoteResponse
+  let remoteUrl = track.url
+  try {
+    for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+      if (!isAllowedDownloadUrl(remoteUrl)) throw Object.assign(new Error('A zeneforrás átirányítása nem engedélyezett.'), { status: 400 })
+      remoteResponse = await fetch(remoteUrl, { redirect: 'manual', signal: AbortSignal.timeout(30 * 60 * 1000) })
+      if (remoteResponse.status < 300 || remoteResponse.status >= 400) break
+      const location = remoteResponse.headers.get('location')
+      if (!location || redirectCount === 5) throw Object.assign(new Error('Túl sok vagy hibás átirányítás a zeneforrásnál.'), { status: 502 })
+      remoteUrl = new URL(location, remoteUrl).toString()
+    }
+    if (!remoteResponse?.ok || !remoteResponse.body) throw Object.assign(new Error('A zeneforrás nem adott letölthető fájlt.'), { status: 502 })
+  } catch (error) {
+    sendJson(response, error.status || 502, { error: error.message || 'A zeneforrás nem érhető el.' })
+    return
+  }
+
+  const contentLength = Number(remoteResponse.headers.get('content-length') || 0)
+  if (contentLength > maxUploadBytes) {
+    sendJson(response, 413, { error: 'A fájl legfeljebb 10 GB lehet.' })
+    return
+  }
+
+  const safeBase = `${track.artist} - ${track.title}`.normalize('NFC')
+    .replace(/[^\p{L}\p{N} ._-]/gu, '_').replace(/^\.+/, '').slice(0, 120)
+  const filename = `${safeBase || 'internetrol-importalt-zene'}.mp3`
+  const filePath = path.join(musicDir, filename)
+  let fileHandle
+  let uploadedBytes = 0
+  const sizeLimit = new Transform({
+    transform(chunk, encoding, callback) {
+      uploadedBytes += chunk.length
+      callback(uploadedBytes > maxUploadBytes
+        ? Object.assign(new Error('A fájl legfeljebb 10 GB lehet.'), { status: 413 })
+        : null, chunk)
+    },
+  })
+  try {
+    fileHandle = await open(filePath, 'wx', 0o640)
+    await pipeline(Readable.fromWeb(remoteResponse.body), sizeLimit, fileHandle.createWriteStream())
+    if (!uploadedBytes) throw Object.assign(new Error('A letöltött fájl üres.'), { status: 502 })
+    sendJson(response, 201, { filename, size: uploadedBytes, licenseUrl: track.licenseUrl })
+  } catch (error) {
+    await fileHandle?.close().catch(() => {})
+    if (fileHandle) await unlink(filePath).catch(() => {})
+    const status = error.code === 'EEXIST' ? 409 : error.status || 502
+    sendJson(response, status, { error: status === 409 ? 'Már létezik ilyen nevű fájl.' : error.message || 'A letöltés nem sikerült.' })
   }
 }
 
@@ -785,8 +865,41 @@ const server = createServer(async (request, response) => {
       profile.state.recent = Array.isArray(body.recent) ? body.recent.filter((id) => typeof id === 'string').slice(0, 100) : []
       profile.state.queue = Array.isArray(body.queue) ? [...new Set(body.queue.filter((id) => typeof id === 'string'))].slice(0, 500) : []
       profile.state.volume = Number.isFinite(body.volume) ? Math.max(0, Math.min(1, body.volume)) : 0.8
+      const playback = body.playback && typeof body.playback === 'object' ? body.playback : {}
+      profile.state.playback = {
+        trackId: typeof playback.trackId === 'string' ? playback.trackId.slice(0, 256) : '',
+        position: Number.isFinite(playback.position) ? Math.max(0, Math.min(86400, playback.position)) : 0,
+        playing: playback.playing === true,
+        shuffle: playback.shuffle === true,
+        repeat: ['off', 'all', 'one'].includes(playback.repeat) ? playback.repeat : 'off',
+      }
       await saveStore()
       sendJson(response, 200, { ok: true })
+      return
+    }
+    const lyricsMatch = pathname.match(/^\/api\/lyrics\/([^/]+)$/)
+    if (lyricsMatch && request.method === 'GET') {
+      const relativePath = Buffer.from(lyricsMatch[1], 'base64url').toString()
+      const trackPath = path.resolve(musicDir, relativePath)
+      if (trackPath === musicDir || !trackPath.startsWith(`${musicDir}${path.sep}`) || !supportedExtensions.has(path.extname(trackPath).toLowerCase())) {
+        sendJson(response, 400, { error: 'Érvénytelen zenefájl.' })
+        return
+      }
+      const lyricsPath = path.join(path.dirname(trackPath), `${path.basename(trackPath, path.extname(trackPath))}.lrc`)
+      let lyricsText
+      try {
+        const lyricsDetails = await stat(lyricsPath)
+        if (!lyricsDetails.isFile()) { sendJson(response, 404, { error: 'Ehhez a zenéhez nincs időzített dalszöveg.' }); return }
+        if (lyricsDetails.size > maxLyricsBytes) { sendJson(response, 413, { error: 'A dalszöveg fájl túl nagy.' }); return }
+        lyricsText = await readFile(lyricsPath, 'utf8')
+      }
+      catch (error) {
+        if (error.code === 'ENOENT') { sendJson(response, 404, { error: 'Ehhez a zenéhez nincs időzített dalszöveg.' }); return }
+        throw error
+      }
+      const lines = parseLrc(lyricsText)
+      if (!lines.length) { sendJson(response, 404, { error: 'Ehhez a zenéhez nincs érvényes időzített dalszöveg.' }); return }
+      sendJson(response, 200, { lines })
       return
     }
     if (pathname === '/api/admin/users' && request.method === 'GET') {
@@ -807,6 +920,28 @@ const server = createServer(async (request, response) => {
         tracks: tracks.length,
         storageBytes: tracks.reduce((total, track) => total + track.size, 0),
       })
+      return
+    }
+    if (pathname === '/api/admin/music/search' && request.method === 'POST') {
+      if (user.role !== 'admin') { sendJson(response, 403, { error: 'Ehhez adminisztrátori jogosultság kell.' }); return }
+      const body = await readJson(request)
+      try {
+        const results = body.source === 'archive'
+          ? await searchInternetArchive(body.query)
+          : body.source === 'jamendo'
+            ? await searchJamendo(body.query, process.env.JAMENDO_CLIENT_ID)
+            : null
+        if (!results) { sendJson(response, 400, { error: 'Ismeretlen zeneforrás.' }); return }
+        sendJson(response, 200, { results })
+      } catch (error) {
+        sendJson(response, 502, { error: error.message || 'A zenekeresés nem sikerült.' })
+      }
+      return
+    }
+    if (pathname === '/api/admin/music/import' && request.method === 'POST') {
+      if (user.role !== 'admin') { sendJson(response, 403, { error: 'Ehhez adminisztrátori jogosultság kell.' }); return }
+      const body = await readJson(request)
+      await saveOnlineTrack(body, response)
       return
     }
     if (pathname === '/api/admin/settings' && request.method === 'PATCH') {
@@ -850,6 +985,33 @@ const server = createServer(async (request, response) => {
       await saveUploadedTrack(request, response, url)
       return
     }
+    const lyricsUploadMatch = pathname.match(/^\/api\/admin\/tracks\/([^/]+)\/lyrics$/)
+    if (lyricsUploadMatch && request.method === 'POST') {
+      if (user.role !== 'admin') { sendJson(response, 403, { error: 'Ehhez adminisztrátori jogosultság kell.' }); request.resume(); return }
+      const relativePath = Buffer.from(lyricsUploadMatch[1], 'base64url').toString()
+      const trackPath = path.resolve(musicDir, relativePath)
+      if (trackPath === musicDir || !trackPath.startsWith(`${musicDir}${path.sep}`) || !supportedExtensions.has(path.extname(trackPath).toLowerCase())) {
+        sendJson(response, 400, { error: 'Érvénytelen zenefájl.' })
+        request.resume()
+        return
+      }
+      try {
+        const trackDetails = await stat(trackPath)
+        if (!trackDetails.isFile()) { sendJson(response, 404, { error: 'A zenefájl nem található.' }); request.resume(); return }
+      } catch (error) {
+        if (error.code === 'ENOENT') { sendJson(response, 404, { error: 'A zenefájl nem található.' }); request.resume(); return }
+        throw error
+      }
+      let lyricsText
+      try { lyricsText = await readText(request, maxLyricsBytes) }
+      catch (error) { request.resume(); sendJson(response, error.status || 400, { error: error.message }); return }
+      const lines = parseLrc(lyricsText)
+      if (!lines.length) { sendJson(response, 400, { error: 'Érvénytelen vagy időbélyeg nélküli LRC fájl.' }); return }
+      const lyricsPath = path.join(path.dirname(trackPath), `${path.basename(trackPath, path.extname(trackPath))}.lrc`)
+      await writeFile(lyricsPath, lyricsText, { mode: 0o640 })
+      sendJson(response, 201, { lines: lines.length })
+      return
+    }
     const trackMatch = pathname.match(/^\/api\/admin\/tracks\/([^/]+)$/)
     if (trackMatch && request.method === 'DELETE') {
       if (user.role !== 'admin') { sendJson(response, 403, { error: 'Ehhez adminisztrátori jogosultság kell.' }); return }
@@ -860,6 +1022,7 @@ const server = createServer(async (request, response) => {
         return
       }
       await unlink(trackPath)
+      await unlink(path.join(path.dirname(trackPath), `${path.basename(trackPath, path.extname(trackPath))}.lrc`)).catch(() => {})
       metadataCache.delete(trackPath)
       sendJson(response, 200, { ok: true })
       return

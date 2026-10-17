@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, CSSProperties } from 'react'
 import {
-  ArrowDown, ArrowUp, AudioLines, Check, Clock3, Disc3, Heart, ListMusic,
+  ArrowDown, ArrowUp, AudioLines, Captions, Check, Clock3, Disc3, Heart, ListMusic,
   ListPlus, LoaderCircle, LogOut, Music2, Pause, Pencil, Play, Plus, Radio,
   RefreshCw, Repeat, Search, ShieldCheck, Shuffle, SkipBack, SkipForward,
   Trash2, Volume2, VolumeX, X,
@@ -29,7 +29,9 @@ type Playlist = { id: string; name: string; trackIds: string[] }
 type View = 'all' | 'favorites' | 'recent' | 'queue' | 'artists' | 'albums' | 'discover' | 'artist' | 'album' | 'admin' | `playlist:${string}`
 type RepeatMode = 'off' | 'all' | 'one'
 type SortBy = 'custom' | 'title' | 'artist' | 'album'
-type UserState = { favorites: string[]; playlists: Playlist[]; recent: string[]; queue: string[]; volume: number }
+type PlaybackState = { trackId: string; position: number; playing: boolean; shuffle: boolean; repeat: RepeatMode }
+type UserState = { favorites: string[]; playlists: Playlist[]; recent: string[]; queue: string[]; volume: number; playback?: PlaybackState }
+type LyricLine = { time: number; text: string }
 
 function readSaved<T>(key: string, fallback: T): T {
   try {
@@ -52,6 +54,11 @@ function formatSize(bytes: number) {
 export default function App() {
   const audio = useRef<HTMLAudioElement>(null)
   const searchInput = useRef<HTMLInputElement>(null)
+  const lyricLineRefs = useRef<(HTMLParagraphElement | null)[]>([])
+  const pendingSeek = useRef(0)
+  const saveTimeout = useRef(0)
+  const profileSwitching = useRef(false)
+  const stateSnapshot = useRef<UserState | null>(null)
   const [tracks, setTracks] = useState<Track[]>([])
   const [user, setUser] = useState<SessionUser | null>(null)
   const [authStatus, setAuthStatus] = useState<AuthStatus>({ setupRequired: false, registrationOpen: true })
@@ -59,6 +66,10 @@ export default function App() {
   const [loadedUserId, setLoadedUserId] = useState('')
   const [current, setCurrent] = useState<Track | null>(null)
   const [playing, setPlaying] = useState(false)
+  const [lyricsOpen, setLyricsOpen] = useState(false)
+  const [lyrics, setLyrics] = useState<LyricLine[]>([])
+  const [lyricsLoading, setLyricsLoading] = useState(false)
+  const [lyricsError, setLyricsError] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [actionError, setActionError] = useState('')
@@ -80,6 +91,22 @@ export default function App() {
   const [sortBy, setSortBy] = useState<SortBy>('custom')
   const [selectedArtist, setSelectedArtist] = useState('')
   const [selectedAlbum, setSelectedAlbum] = useState('')
+
+  const activeLyricIndex = lyrics.reduce((active, line, index) => line.time <= time ? index : active, -1)
+
+  stateSnapshot.current = {
+    favorites, playlists, recent, queue, volume,
+    playback: { trackId: current?.id || '', position: time, playing, shuffle, repeat },
+  }
+
+  async function persistProfileState() {
+    const state = stateSnapshot.current
+    if (!state) return
+    const response = await fetch('/api/me/state', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state),
+    })
+    if (!response.ok) throw new Error('Nem sikerült menteni a profil lejátszási állapotát.')
+  }
 
   async function loadLibrary() {
     setLoading(true)
@@ -109,8 +136,18 @@ export default function App() {
     setRecent(saved.recent || [])
     setQueue(saved.queue || [])
     setVolume(Number.isFinite(saved.volume) ? saved.volume : 0.8)
+    const playback = saved.playback
+    const resumedTrack = playback?.trackId ? library.tracks.find((track) => track.id === playback.trackId) || null : null
+    pendingSeek.current = resumedTrack ? Math.max(0, playback?.position || 0) : 0
+    setCurrent(resumedTrack)
+    setTime(pendingSeek.current)
+    setDuration(0)
+    setPlaying(Boolean(resumedTrack && playback?.playing))
+    setShuffle(playback?.shuffle === true)
+    setRepeat(playback?.repeat === 'all' || playback?.repeat === 'one' ? playback.repeat : 'off')
     setLoadedUserId(account.id)
     setUser(account)
+    profileSwitching.current = false
     setError('')
     setLoading(false)
   }
@@ -145,7 +182,28 @@ export default function App() {
     setView('all')
   }
 
+  async function prepareProfileSwitch() {
+    if (!user || loadedUserId !== user.id) return false
+    if (saveTimeout.current) {
+      window.clearTimeout(saveTimeout.current)
+      saveTimeout.current = 0
+    }
+    try {
+      await persistProfileState()
+      profileSwitching.current = true
+      return true
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Nem sikerült menteni a profil lejátszási állapotát.')
+      return false
+    }
+  }
+
+  function cancelProfileSwitch() {
+    profileSwitching.current = false
+  }
+
   async function signOut() {
+    await persistProfileState().catch(() => {})
     await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {})
     setUser(null)
     setLoadedUserId('')
@@ -157,16 +215,24 @@ export default function App() {
 
   useEffect(() => { void initializeAuth() }, [])
   useEffect(() => {
-    if (!user || loadedUserId !== user.id) return
+    if (!user || loadedUserId !== user.id || profileSwitching.current) return
     const timeout = window.setTimeout(() => {
-      void fetch('/api/me/state', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ favorites, recent, queue, volume }),
-      }).catch(() => setError('Nem sikerült szinkronizálni a fiók adatait.'))
+      saveTimeout.current = 0
+      if (!profileSwitching.current) void persistProfileState().catch(() => setError('Nem sikerült szinkronizálni a fiók adatait.'))
     }, 250)
-    return () => window.clearTimeout(timeout)
-  }, [favorites, loadedUserId, queue, recent, user, volume])
+    saveTimeout.current = timeout
+    return () => {
+      window.clearTimeout(timeout)
+      if (saveTimeout.current === timeout) saveTimeout.current = 0
+    }
+  }, [current, favorites, loadedUserId, playing, queue, recent, repeat, shuffle, user, volume])
+  useEffect(() => {
+    if (!user || loadedUserId !== user.id) return
+    const interval = window.setInterval(() => {
+      if (!profileSwitching.current) void persistProfileState().catch(() => setError('Nem sikerült menteni a lejátszás pozícióját.'))
+    }, 5000)
+    return () => window.clearInterval(interval)
+  }, [loadedUserId, user])
   useEffect(() => {
     if (!user || loadedUserId !== user.id) return
     let active = true
@@ -200,6 +266,32 @@ export default function App() {
     if (playing) void audio.current.play().catch(() => setPlaying(false))
     else audio.current.pause()
   }, [current, playing, volume])
+  useEffect(() => {
+    if (!lyricsOpen || !current) {
+      setLyrics([])
+      setLyricsError('')
+      return
+    }
+    let active = true
+    setLyricsLoading(true)
+    setLyricsError('')
+    void fetch(`/api/lyrics/${encodeURIComponent(current.id)}`)
+      .then(async (response) => {
+        const result = await response.json() as { lines?: LyricLine[]; error?: string }
+        if (!response.ok) throw new Error(result.error || 'A dalszöveg nem érhető el.')
+        if (active) setLyrics(result.lines || [])
+      })
+      .catch((cause) => {
+        if (active) setLyricsError(cause instanceof Error ? cause.message : 'A dalszöveg nem érhető el.')
+      })
+      .finally(() => { if (active) setLyricsLoading(false) })
+    return () => { active = false }
+  }, [current?.id, lyricsOpen])
+  useEffect(() => {
+    if (lyricsOpen && activeLyricIndex >= 0) {
+      lyricLineRefs.current[activeLyricIndex]?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }
+  }, [activeLyricIndex, lyricsOpen])
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
@@ -362,6 +454,17 @@ export default function App() {
     setTime(nextTime)
   }
 
+  function handleLoadedMetadata(event: React.SyntheticEvent<HTMLAudioElement>) {
+    const loadedDuration = event.currentTarget.duration
+    setDuration(loadedDuration)
+    if (pendingSeek.current > 0) {
+      const position = Math.min(pendingSeek.current, Number.isFinite(loadedDuration) ? loadedDuration : pendingSeek.current)
+      event.currentTarget.currentTime = position
+      setTime(position)
+      pendingSeek.current = 0
+    }
+  }
+
   async function updateSharedPlaylists(route: string, method: string, body?: unknown) {
     setActionError('')
     try {
@@ -495,7 +598,7 @@ export default function App() {
           <button className="icon-button refresh-button" aria-label="Könyvtár frissítése" title="Könyvtár frissítése" onClick={() => void loadLibrary()} disabled={loading}>
             {loading ? <LoaderCircle className="spin" size={18} /> : <RefreshCw size={17} />}
           </button>
-          <div className="account-actions"><div><strong>{user.name}</strong><small>{user.role === 'admin' ? 'Adminisztrátor' : 'Fiók'}</small></div><ProfileSwitcher user={user} onProfileChanged={switchProfile} /><button className="icon-button" aria-label="Kijelentkezés" title="Kijelentkezés" onClick={() => void signOut()}><LogOut size={17} /></button></div>
+          <div className="account-actions"><div><strong>{user.name}</strong><small>{user.role === 'admin' ? 'Adminisztrátor' : 'Fiók'}</small></div><ProfileSwitcher user={user} onBeforeProfileChange={prepareProfileSwitch} onProfileChangeCanceled={cancelProfileSwitch} onProfileChanged={switchProfile} /><button className="icon-button" aria-label="Kijelentkezés" title="Kijelentkezés" onClick={() => void signOut()}><LogOut size={17} /></button></div>
         </header>
 
         {actionError ? <div className="action-error" role="alert">{actionError}</div> : null}
@@ -575,6 +678,12 @@ export default function App() {
         </div>}
       </main>
 
+      {lyricsOpen ? <aside className="lyrics-panel" aria-label="Szinkronizált dalszöveg">
+        <div className="lyrics-panel-head"><div><span>IDŐZÍTETT DALSZÖVEG</span><strong>{current?.title || 'Nincs lejátszott zene'}</strong></div><button className="icon-button" aria-label="Dalszöveg bezárása" onClick={() => setLyricsOpen(false)}><X size={17} /></button></div>
+        {lyricsLoading ? <div className="lyrics-message"><LoaderCircle className="spin" size={20} /> Dalszöveg betöltése...</div> : lyricsError ? <div className="lyrics-message">{lyricsError}</div> : <div className="lyrics-lines" aria-live="polite">
+          {lyrics.map((line, index) => <p ref={(element) => { lyricLineRefs.current[index] = element }} className={index === activeLyricIndex ? 'lyric-line active' : index > activeLyricIndex ? 'lyric-line upcoming' : 'lyric-line'} key={`${line.time}:${index}`}>{line.text}</p>)}
+        </div>}
+      </aside> : null}
       <section className="player" aria-label="Zenelejátszó">
         <div className="now-playing">
           <div className={current ? 'player-art has-track' : 'player-art'}>{current?.coverUrl ? <img src={current.coverUrl} alt="" /> : current ? <Music2 size={20} /> : <Disc3 size={21} />}</div>
@@ -595,10 +704,11 @@ export default function App() {
         </div>
         <div className="player-volume">
           <span className="server-live"><span /> SZERVER AKTÍV</span>
+          <button className={lyricsOpen ? 'control-button mode-active' : 'control-button'} aria-label={lyricsOpen ? 'Dalszöveg bezárása' : 'Időzített dalszöveg megjelenítése'} title="Dalszöveg" disabled={!current} onClick={() => setLyricsOpen(!lyricsOpen)}><Captions size={17} /></button>
           <button className="control-button volume-icon" aria-label={volume === 0 ? 'Hang bekapcsolása' : 'Némítás'} onClick={() => setVolume(volume === 0 ? 0.8 : 0)}>{volume === 0 ? <VolumeX size={17} /> : <Volume2 size={17} />}</button>
           <input aria-label="Hangerő" type="range" min="0" max="1" step="0.01" value={volume} onChange={(event) => setVolume(Number(event.target.value))} style={{ '--progress': `${volume * 100}%` } as CSSProperties} />
         </div>
-        <audio ref={audio} src={current?.url} onTimeUpdate={(event) => setTime(event.currentTarget.currentTime)} onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)} onEnded={handleEnded} onError={() => { if (current) setError('A kiválasztott zenefájl nem játszható le.') }} />
+        <audio key={user.selectedProfileId} ref={audio} src={current?.url} onTimeUpdate={(event) => setTime(event.currentTarget.currentTime)} onLoadedMetadata={handleLoadedMetadata} onEnded={handleEnded} onError={() => { if (current) setError('A kiválasztott zenefájl nem játszható le.') }} />
       </section>
     </div>
   )

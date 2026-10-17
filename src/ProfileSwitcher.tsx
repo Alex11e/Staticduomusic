@@ -5,12 +5,14 @@ import type { SessionUser } from './AuthScreen'
 
 type ProfileSwitcherProps = {
   user: SessionUser
+  onBeforeProfileChange: () => Promise<boolean>
+  onProfileChangeCanceled: () => void
   onProfileChanged: (user: SessionUser) => Promise<void>
 }
 
 type ProfileResponse = { user?: SessionUser; error?: string }
 
-export default function ProfileSwitcher({ user, onProfileChanged }: ProfileSwitcherProps) {
+export default function ProfileSwitcher({ user, onBeforeProfileChange, onProfileChangeCanceled, onProfileChanged }: ProfileSwitcherProps) {
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
   const [pin, setPin] = useState('')
@@ -45,11 +47,12 @@ export default function ProfileSwitcher({ user, onProfileChanged }: ProfileSwitc
 
   async function switchProfile(event: FormEvent<HTMLFormElement>, profileId: string) {
     event.preventDefault()
+    if (!await onBeforeProfileChange()) return
     const changed = await request(`/api/profiles/${encodeURIComponent(profileId)}/select`, 'POST', { pin: pins[profileId] || '' })
     if (changed) {
       setPins((saved) => ({ ...saved, [profileId]: '' }))
       setOpen(false)
-    }
+    } else onProfileChangeCanceled()
   }
 
   async function createProfile(event: FormEvent<HTMLFormElement>) {

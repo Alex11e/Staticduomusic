@@ -192,11 +192,15 @@ test('admin setup, fiókok, jogosultságok, szinkron és zenefeltöltés', async
     method: 'POST', body: { pin: '2468' }, cookie: userCookie,
   })
   assert.equal(selectDuo.data.user.selectedProfileId, duoProfile.id)
-  const state = { favorites: ['track-1'], recent: ['track-1'], queue: ['track-2'], volume: 0.4 }
+  const state = {
+    favorites: ['track-1'], recent: ['track-1'], queue: ['track-2'], volume: 0.4,
+    playback: { trackId: 'track-1', position: 42, playing: true, shuffle: true, repeat: 'all' },
+  }
   assert.equal((await requestJson('/api/me/state', { method: 'PUT', body: state, cookie: userCookie })).response.status, 200)
   assert.deepEqual((await requestJson('/api/me/state', { cookie: userCookie })).data, { ...state, playlists: [] })
   assert.deepEqual((await requestJson('/api/me/state', { cookie: secondSessionCookie })).data, {
-    favorites: [], recent: [], queue: [], volume: 0.8, playlists: [],
+    favorites: [], recent: [], queue: [], volume: 0.8,
+    playback: { trackId: '', position: 0, playing: false, shuffle: false, repeat: 'off' }, playlists: [],
   })
   const selectOtherSession = await requestJson(`/api/profiles/${duoProfile.id}/select`, {
     method: 'POST', body: { pin: '2468' }, cookie: secondSessionCookie,
@@ -233,12 +237,24 @@ test('admin setup, fiókok, jogosultságok, szinkron és zenefeltöltés', async
   assert.equal(deleteProfile.response.status, 200)
   assert.equal(deleteProfile.data.user.profiles.length, 9)
   assert.deepEqual((await requestJson('/api/me/state', { cookie: secondSessionCookie })).data, {
-    favorites: [], recent: [], queue: [], volume: 0.8, playlists: [],
+    favorites: [], recent: [], queue: [], volume: 0.8,
+    playback: { trackId: '', position: 0, playing: false, shuffle: false, repeat: 'off' }, playlists: [],
   })
 
   assert.equal((await requestJson('/api/admin/users', { cookie: userCookie })).response.status, 403)
   assert.equal((await requestJson('/api/admin/users', { cookie: adminCookie })).data.users.length, 2)
   assert.equal((await requestJson('/api/admin/stats', { cookie: adminCookie })).data.users, 2)
+  assert.equal((await requestJson('/api/admin/music/search', {
+    method: 'POST', body: { source: 'archive', query: 'test' }, cookie: userCookie,
+  })).response.status, 403)
+  const unconfirmedImport = await requestJson('/api/admin/music/import', {
+    method: 'POST', body: { source: 'direct', url: 'https://archive.org/song.mp3' }, cookie: adminCookie,
+  })
+  assert.equal(unconfirmedImport.response.status, 400)
+  const untrustedImport = await requestJson('/api/admin/music/import', {
+    method: 'POST', body: { source: 'direct', url: 'https://example.com/song.mp3', rightsConfirmed: true }, cookie: adminCookie,
+  })
+  assert.equal(untrustedImport.response.status, 400)
 
   const csrf = await requestJson('/api/admin/settings', {
     method: 'PATCH', body: { registrationOpen: false }, cookie: adminCookie, headers: { Origin: 'https://attacker.example' },
@@ -270,7 +286,18 @@ test('admin setup, fiókok, jogosultságok, szinkron és zenefeltöltés', async
   assert.equal(cover.status, 200)
   assert.equal(cover.headers.get('content-type'), 'image/png')
   assert.equal((await cover.arrayBuffer()).byteLength, 8)
+  const lyricsText = '[00:00.00]First line\n[00:02.50]Second line'
+  const lyricsUpload = await fetch(`${serverUrl}/api/admin/tracks/${uploadedTrack.id}/lyrics`, {
+    method: 'POST', headers: { Cookie: adminCookie, 'Content-Type': 'text/plain' }, body: lyricsText,
+  })
+  assert.equal(lyricsUpload.status, 201)
+  assert.equal((await requestJson(`/api/lyrics/${uploadedTrack.id}`, { cookie: adminCookie })).data.lines[1].text, 'Second line')
+  const deniedLyricsUpload = await fetch(`${serverUrl}/api/admin/tracks/${uploadedTrack.id}/lyrics`, {
+    method: 'POST', headers: { Cookie: userCookie, 'Content-Type': 'text/plain' }, body: lyricsText,
+  })
+  assert.equal(deniedLyricsUpload.status, 403)
   assert.equal((await requestJson(`/api/admin/tracks/${uploadedTrack.id}`, { method: 'DELETE', cookie: adminCookie })).response.status, 200)
+  assert.equal((await requestJson(`/api/lyrics/${uploadedTrack.id}`, { cookie: adminCookie })).response.status, 404)
 
   const archive = await createZipFixture([
     { name: 'Artist/Album/zip-track.mp3', data: taggedAudioFixture() },
